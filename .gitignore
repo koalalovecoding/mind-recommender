@@ -4,3 +4,4 @@ docs/01_problem_formulation.md
 data/
 __pycache__/
 *.pyc
+.venv/
