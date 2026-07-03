@@ -25,7 +25,19 @@ by minimizing the following regularized objective (loss function)
 $$\sum_{u,i} c_{ui} (R_{ui}-P^{(u)}\cdot Q^{(i)})^{2}+\lambda (\|P\|_{F}^{2}+\|Q\|_{F}^{2}).
 $$
 Each term in this objective has a specific interpretation:
-- **What does $(R_{ui}-P^{(u)}\cdot Q^{(i)})^{2}$ measure?**
-- **What is $c_{ui}$?**
+- **What does $(R_{ui}-P^{(u)}\cdot Q^{(i)})^{2}$ measure?** This term measures the prediction error at the $(u,i)$-th entry.
+- **What is $c_{ui}$?** The coefficient $c_{ui}$ is the confidence weight, defined by $c_{ui}=1+\alpha R_{ui}$, where $\alpha>0$.
+If $R_{ui}=0$, then $c_{ui}=1$, so the unclicked entry is treated as a low-confidence observation. If $R_{ui}=1$, then $c_{ui}=1+\alpha$,
+so the clicked entry receives a larger weight. This reflects the idea that clicks are reliable positive signals, while non-clicks are weak signals.
+This model there pays more attention to clicked interactions but still uses unclicked entries as weak information.
 - **Why do we sum over all user-item interaction terms instead of only non-zero entries?**
-- **What is $\lambda (\|P\|_{F}^{2}+\|Q\|_{F}^{2})$ and why is it necessary?**
+In implicit feedback recommendation, the observed matrix contains both clicked and unclicked entries. A clicked entry $R_{ui}=1$ is a strong positive signal, but an unclicked entry $R_{ui}=0$ is not a strong negative signal.
+It may mean that the user disliked the item, but it may also mean that the user was never exposed to the item. Therefore, we should not simply discard all zero entries. If we only trained on clicked entries, the model would only 
+learn which items should receive high scores, but it would not learn how to distinguish them from the large bumber of unclicked items. By considering all user-tem paris, the model is encouraged to assign high scores to clicked items while keeping teh scores of unclicked items relatively low, but only with low confidence.
+- **What is $\lambda (\|P\|_{F}^{2}+\|Q\|_{F}^{2})$ and why is it necessary?** The final term is a regularization term. The squared Frobenius norms $\|P\|_{F}^{2}$ and $\|Q\|_{F}^{2}$ measure the total square magnitude of all entries in the 
+user and item latent factor matrices. The term penalizes overly large latent factors and helps prevent overfitting. Without this regularization term, the model might fit the training data too closely by learning very large or highly specialized embeddings. The parameter $\lambda$ the strength of this penalty.
+
+### Explicit feedback and implicit feedback
+This objective differs from the standard explicit-feedback matrix factorization objective. In explicit-feedback settings, such as movie ratings, the loss is usually computed only over observed ratings, because missing ratings are truly unknown and should not be treated as zero. In contrast, implicit-feedback data records 
+user behavior such as clicks, views, or purchases. A clicked item provides a positive signal, while an unclicked item is ambiguous: it may indicate lack of interest, but it may also mean that the user was never exposed to the item. Therefore, implicit matrix factorization considers all user-item pairs, but assigns different 
+confidence weights to clicked and unclicked entries. Clicked entries receive high confidence, while unclicked entries are treated as low-confidence observations rather than strong negatives.
