@@ -1,6 +1,5 @@
 .DS_Store
 day1_low_rank_recommender_problem_formulation.md
-docs/01_problem_formulation.md
 data/
 __pycache__/
 *.pyc
