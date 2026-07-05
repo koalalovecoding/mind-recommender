@@ -133,7 +133,7 @@ $$
 Then
 
 $$
-\operatorname{rank}(S) \leq k.
+\mathrm{rank}(S) \leq k.
 $$
 
 For each user-item pair,
@@ -254,7 +254,7 @@ $$
 By the Eckart-Young theorem,
 
 $$
-R_k =\arg\min_{\operatorname{rank}(S)\leq k} |R-S|_F^2.
+R_k =\arg\min_{\mathrm{rank}(S)\leq k} |R-S|_F^2.
 $$
 
 Therefore, truncated SVD gives the best rank-$k$ approximation to $R$ under the Frobenius norm.
@@ -268,7 +268,7 @@ In this project stage, the reconstructed matrix $R_k$ is used as a score matrix.
 Plain truncated SVD solves an unweighted and unregularized low-rank approximation problem:
 
 $$
-\min_{\operatorname{rank}(S)\leq k}
+\min_{\mathrm{rank}(S)\leq k}
 |R-S|_F^2.
 $$
 
