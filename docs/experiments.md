@@ -386,3 +386,21 @@ impression_id
 time
 source
 ```
+
+
+## 2026-07-07 Experiment: Phase 2 Part A Dataset Preparation
+
+**Goal.** Prepare the MIND-small dataset for downstream recommendation modeling by converting raw behavior and news files into cleaned interaction tables.
+
+**Summary.** In Phase 2 Part A, I loaded the MIND-small train/dev behavior files and news metadata, parsed impression logs into user-item-click records, added user history clicks as positive interactions, combined and deduplicated train/dev news metadata, and merged news metadata into the interaction tables using a left join. After merging, I dropped the duplicate `news_id` column and kept `item_id` as the standard item identifier for downstream recommendation models. The train table stayed at `(10951083, 6)` before the metadata merge and became `(10951083, 10)` after merging and dropping `news_id`. The dev table stayed at `(5103512, 6)` before the metadata merge and became `(5103512, 10)` after merging and dropping `news_id`. The unchanged row counts confirm that no interaction rows were dropped. The final cleaned tables include interaction fields plus news metadata fields such as `category`, `subcategory`, `title`, and `abstract`.
+
+**Generated files.**
+- `../data/processed/interactions_history_train.parquet`: train interaction table from parsed impressions and user history.
+- `../data/processed/interactions_history_dev.parquet`: dev interaction table from parsed impressions and user history.
+- `../data/processed/news.parquet`: combined and deduplicated news metadata from train/dev `news.tsv`.
+- `../data/processed/train_with_news.parquet`: cleaned train interaction table enriched with news metadata.
+- `../data/processed/dev_with_news.parquet`: cleaned dev interaction table enriched with news metadata.
+
+**Final columns.** `user_id`, `item_id`, `click`, `impression_id`, `time`, `source`, `category`, `subcategory`, `title`, `abstract`.
+
+**Conclusion.** Phase 2 Part A is complete. The cleaned train/dev interaction files are ready for ID mapping and sparse user-item matrix construction.

@@ -1,8 +1,7 @@
-#step 5: merge news metadata
-#In this step, I merged parsed user-item interaction records with news metadata from news.tsv,
-# enriching each interaction with category, subcategory, title, and abstract fields.
-# This preserves the implicit-feedback interaction structure while preparing the data for
-# later hybrid recommendation models such as LightFM and content-enhanced retrieval.
+# Step 5: Create cleaned interaction tables with news metadata.
+# Merge parsed user-item interactions with news metadata from news.tsv, add category,
+# subcategory, title, and abstract fields, and keep item_id as the standard item identifier.
+# The resulting train/dev tables are the cleaned files used for downstream modeling.
 
 from pathlib import Path
 import pandas as pd
@@ -34,6 +33,13 @@ def interactions_news_merge(interactions_df, news_df):
 train_with_news = interactions_news_merge(train_df, news_meta)
 dev_with_news = interactions_news_merge(dev_df, news_meta)
 
+# After merging, news_id duplicates item_id, so we drop news_id and keep item_id
+# as the standard item identifier for downstream recommendation models.
+
+# In pandas, drop(columns=["news_id"]) removes the column named "news_id".
+# If we wrote drop(["news_id"]) without columns=..., pandas would try to drop a row/index label instead.
+train_with_news = train_with_news.drop(columns=["news_id"])
+dev_with_news = dev_with_news.drop(columns=["news_id"])
 
 print("train before merge:", train_df.shape)
 print("train after merge:", train_with_news.shape)
