@@ -105,8 +105,8 @@ Processed_Dir.mkdir(parents=True, exist_ok=True)
 # 2. history rows
 # we save it as the general interaction table.
 
-train_interactions_path = Processed_Dir / "interactions_train.parquet"
-dev_interactions_path = Processed_Dir / "interactions_dev.parquet"
+train_interactions_path = Processed_Dir / "interactions_history_train.parquet"
+dev_interactions_path = Processed_Dir / "interactions_history_dev.parquet"
 news_path = Processed_Dir / "news.parquet"
 
 # Save train and dev interaction tables
