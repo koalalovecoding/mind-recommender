@@ -149,3 +149,19 @@ print(train_impressions_history["click"].value_counts())
 
 print("\nDev click counts:")
 print(dev_impressions_history["click"].value_counts())
+
+
+#sanity check
+assert set(train_impressions_history["source"].unique()) == {"impression", "history"}
+assert set(dev_impressions_history["source"].unique()) == {"impression", "history"}
+
+assert train_impressions_history["user_id"].notna().all()
+assert train_impressions_history["item_id"].notna().all()
+assert train_impressions_history["click"].isin([0, 1]).all()
+
+assert train_impressions_history[
+    train_impressions_history["source"] == "history"
+]["click"].eq(1).all()
+
+assert not train_impressions_history["item_id"].eq("nan").any()
+assert not dev_impressions_history["item_id"].eq("nan").any()

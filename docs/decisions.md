@@ -80,3 +80,12 @@ it does not fully reveal the latent preference.
 
 **Note.**  The important distinction is that MIND gives exposure information. A non-clicked exposed item is not a strong 
 negative preference, but it is also not the same as a completely unobserved item.
+
+
+## 2026-07-06   Store processed interactions as Parquet
+
+**Decision.**: Store processed interaction tables as `.parquet` files instead of `.csv` or `.tsv`.
+
+**Reason.**: The parsed MIND-small interaction tables contain millions of rows, so CSV/TSV would be larger and slower to read/write. Parquet is more efficient for large tabular data, preserves column types better, and works cleanly with pandas through `pyarrow`.
+
+**Scope.**: Processed data files in `data/processed/`, including `interactions_train.parquet`, `interactions_dev.parquet`, and `news.parquet`.
