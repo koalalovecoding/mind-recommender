@@ -86,6 +86,40 @@ negative preference, but it is also not the same as a completely unobserved item
 
 **Decision.**: Store processed interaction tables as `.parquet` files instead of `.csv` or `.tsv`.
 
-**Reason.**: The parsed MIND-small interaction tables contain millions of rows, so CSV/TSV would be larger and slower to read/write. Parquet is more efficient for large tabular data, preserves column types better, and works cleanly with pandas through `pyarrow`.
+**Reason.**: The parsed MIND-small interaction tables contain millions of rows, so CSV/TSV would be larger and slower to read/write. 
+Parquet is more efficient for large tabular data, preserves column types better, and works cleanly with pandas through `pyarrow`.
 
 **Scope.**: Processed data files in `data/processed/`, including `interactions_train.parquet`, `interactions_dev.parquet`, and `news.parquet`.
+
+
+
+## 2026-07-07   Store ID mappings as JSON dictionaries
+
+**Decision.**: Save user/item ID mappings as JSON files and load them with Python's `json.load`, rather than storing or loading them as parquet tables.
+
+**Reason.**: The mapping objects are dictionaries, not tabular datasets. For example, `user_idx_map` maps raw `user_id` strings to integer matrix row 
+indices, and `item_idx_map` maps raw `item_id` strings to integer matrix column indices. JSON preserves this key-value structure directly and makes the 
+mapping easy to reuse when building sparse matrices, training models, evaluating recommendations, and converting matrix indices back to original IDs.
+
+Parquet is better suited for DataFrame-style interaction tables such as `train_with_news.parquet` and `dev_with_news.parquet`. Although `pd.read_json` 
+exists, it would read the mapping through pandas as a Series or DataFrame and then require conversion back to a dictionary, which is unnecessary for this use case.
+
+**Scope.**: Phase 2 Part B ID mapping and sparse matrix construction.
+
+
+## 2026-07-07   Use warm-start evaluation for matrix-based collaborative filtering
+
+**Decision.**: Use warm-start evaluation as the default validation protocol for classical collaborative filtering models, and treat dev-only users or 
+dev-only items as cold-start cases that should be counted separately rather than included in the standard evaluation matrix.
+
+**Reason.**: Matrix-based collaborative filtering models such as SVD, ALS, BPR, ItemKNN, and UserKNN learn representations from the rows and columns of 
+the training interaction matrix. A user that never appears in train has no learned user representation, and an item that never appears in train has no 
+learned item representation. Therefore, these models cannot directly score interactions involving completely unseen users or unseen items without an additional 
+cold-start strategy. Warm-start evaluation is still a valid generalization test because the model is asked to predict future user-item interactions that 
+were not used for training; only the user identity and item identity are known from the training matrix.
+
+**Cold-start strategy.**: New users or new items should be handled as a separate cold-start problem, not mixed into the ordinary matrix factorization evaluation. 
+Possible strategies include popularity fallback, content-based recommendation, hybrid models, metadata features, text embeddings, or two-tower models that can 
+produce representations from user/item features rather than relying only on historical interaction rows and columns.
+
+**Scope.**: Classical collaborative filtering models, sparse train/dev matrix construction, and standard ranking evaluation.

@@ -89,3 +89,50 @@ Mark the `data/` directory as excluded in PyCharm. The files should still remain
 Exclude `data/` from IDE indexing; access data files through paths in scripts.
 
 
+
+
+## 2026-07-07 Pitfall: Do not use dev history rows when building the dev sparse matrix
+
+**Where.**
+File: `notebooks/06_user_item_interaction_matrix`
+Step: Phase 2 Part B, Step 8 — build `dev_interactions.npz`.
+
+**Problem.**
+In Step 8, the dev sparse matrix is built from `dev_with_news.parquet`. A tempting but incorrect first version is:
+
+```python
+dev_pos = dev_df[dev_df["click"] == 1][["user_id", "item_id"]].drop_duplicates()
+```
+
+This selects all positive rows in the dev interaction table. However, the dev table contains both `source = "history"` rows and `source = "impression"` rows. As a result, this code would include dev history clicks in `dev_interactions.npz`.
+
+**Why this is a pitfall.**
+The dev sparse matrix is meant to be the validation ground-truth matrix for later ranking evaluation. It should contain the clicked items from dev impressions, because those are the target interactions the recommender is expected to recover. Dev history clicks are past clicks used to describe the user's previous behavior; they should not be mixed into the validation target.
+
+**Correct implementation.**
+When building `dev_interactions.npz`, use only clicked dev impressions:
+
+```python
+dev_pos = dev_df[
+    (dev_df["click"] == 1) &
+    (dev_df["source"] == "impression")
+][["user_id", "item_id"]].drop_duplicates()
+```
+
+Then apply the warm-start filter:
+
+```python
+dev_pos = dev_pos[
+    dev_pos["user_id"].isin(user_idx_map)
+    & dev_pos["item_id"].isin(item_idx_map)
+]
+```
+
+**Correct interpretation.**
+The train sparse matrix can use positive train interactions from both `source = "history"` and `source = "impression"`, because both are training signals. The dev sparse matrix should only use `source = "impression"` with `click = 1`, because it is used as validation ground truth, not as additional user history.
+
+**Takeaway.**
+For Step 8, train positives and dev validation positives are not selected in exactly the same way: train uses all positive train clicks, while dev uses only clicked dev impressions.
+
+
+

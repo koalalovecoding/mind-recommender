@@ -392,7 +392,12 @@ source
 
 **Goal.** Prepare the MIND-small dataset for downstream recommendation modeling by converting raw behavior and news files into cleaned interaction tables.
 
-**Summary.** In Phase 2 Part A, I loaded the MIND-small train/dev behavior files and news metadata, parsed impression logs into user-item-click records, added user history clicks as positive interactions, combined and deduplicated train/dev news metadata, and merged news metadata into the interaction tables using a left join. After merging, I dropped the duplicate `news_id` column and kept `item_id` as the standard item identifier for downstream recommendation models. The train table stayed at `(10951083, 6)` before the metadata merge and became `(10951083, 10)` after merging and dropping `news_id`. The dev table stayed at `(5103512, 6)` before the metadata merge and became `(5103512, 10)` after merging and dropping `news_id`. The unchanged row counts confirm that no interaction rows were dropped. The final cleaned tables include interaction fields plus news metadata fields such as `category`, `subcategory`, `title`, and `abstract`.
+**Summary.** In Phase 2 Part A, I loaded the MIND-small train/dev behavior files and news metadata, parsed impression logs into user-item-click records, 
+added user history clicks as positive interactions, combined and deduplicated train/dev news metadata, and merged news metadata into the interaction tables 
+using a left join. After merging, I dropped the duplicate `news_id` column and kept `item_id` as the standard item identifier for downstream recommendation 
+models. The train table stayed at `(10951083, 6)` before the metadata merge and became `(10951083, 10)` after merging and dropping `news_id`. The dev table 
+stayed at `(5103512, 6)` before the metadata merge and became `(5103512, 10)` after merging and dropping `news_id`. The unchanged row counts confirm that no 
+interaction rows were dropped. The final cleaned tables include interaction fields plus news metadata fields such as `category`, `subcategory`, `title`, and `abstract`.
 
 **Generated files.**
 - `../data/processed/interactions_history_train.parquet`: train interaction table from parsed impressions and user history.
@@ -403,4 +408,36 @@ source
 
 **Final columns.** `user_id`, `item_id`, `click`, `impression_id`, `time`, `source`, `category`, `subcategory`, `title`, `abstract`.
 
-**Conclusion.** Phase 2 Part A is complete. The cleaned train/dev interaction files are ready for ID mapping and sparse user-item matrix construction.
+**Conclusion.** Phase 2 Part A is complete. The cleaned train/dev interaction files are ready for ID mapping and 
+sparse user-item matrix construction.
+
+## 2026-07-07 Build Warm-start Dev Matrix for Phase 2 Part B Step 8
+
+**Goal.**
+Construct sparse train/dev user-item matrices for classical collaborative filtering models while keeping the validation 
+setup consistent with a warm-start recommendation protocol.
+
+**Context.**
+In Phase 2 Part A, the processed train/dev interaction tables contain two types of positive signals: historical clicks 
+from `source = "history"` and clicked impression items from `source = "impression"`. For training, historical clicks 
+and clicked impressions can both be useful positive implicit-feedback signals. For validation, however, the dev matrix 
+should represent the future clicked items we want the recommender to recover, so it should use clicked dev impressions 
+rather than dev history rows.
+
+**Implementation.**
+The train sparse matrix is built from `train_with_news.parquet` using all rows with `click = 1`, including both historical 
+clicks and clicked impression rows. The dev sparse matrix is built from `dev_with_news.parquet` using only rows where 
+`click = 1` and `source = "impression"`. Before constructing the dev matrix, dev rows are filtered to keep only users 
+and items that appear in the train-based ID mappings created in Step 7. This ensures that both train and dev matrices 
+use the same row and column index spaces.
+
+**Interpretation.**
+The resulting `train_interactions.npz` is the matrix used for model fitting. The resulting `dev_interactions.npz` is 
+not used for training; it is a validation ground-truth matrix for later Recall@K, NDCG@K, and MRR evaluation. Dev users 
+or dev items that do not appear in train are counted as cold-start cases and excluded from the standard classical 
+collaborative filtering evaluation.
+
+**Conclusion.**
+For the current classical matrix-based recommender pipeline, Step 8 follows a warm-start evaluation setup: models 
+are trained on positive train interactions and evaluated on future dev impression clicks for users and items already 
+present in the train matrix.
