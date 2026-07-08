@@ -20,6 +20,7 @@ The project treats recommendation not simply as click prediction, but as learnin
 
   * [Truncated SVD Baseline](#truncated-svd-baseline)
   * [Why SVD Is Only a Baseline](#why-svd-is-only-a-baseline)
+* [MIND-small Data Processing](#mind-small-data-processing)
 * [Repository Structure](#repository-structure)
 * [Main Files](#main-files)
 * [How to Run](#how-to-run)
@@ -47,13 +48,13 @@ sparse and biased user-item interaction matrix
 → demo / API / optional Azure deployment
 ```
 
-The current stage focuses on the mathematical foundation of recommender systems through a small low-rank toy example.
+The current stage has moved from the toy low-rank example to MIND-small data processing. The project now includes cleaned interaction tables, train-based user/item index mappings, and sparse train/dev user-item matrices for classical recommendation models.
 
 ---
 
 ## Current Stage
 
-The current version implements a toy low-rank recommender system.
+The current version has completed the mathematical toy example and Phase 2 Part B of the MIND-small data pipeline.
 
 Implemented so far:
 
@@ -63,8 +64,13 @@ Implemented so far:
 * Hand-written truncated SVD implementation
 * Low-rank score matrix reconstruction
 * Top-K recommendation generation from reconstructed scores
+* MIND-small raw file inspection
+* Impression-log parsing and user-history parsing
+* News metadata merge into train/dev interaction tables
+* Train-based user/item integer index mappings
+* Sparse train/dev user-item interaction matrices
 
-This first stage is not intended to optimize performance. Its purpose is to make the low-rank structure behind collaborative filtering explicit and understandable.
+The current processed matrices are ready for classical recommendation baselines such as popularity ranking, sparse truncated SVD, ALS, and BPR.
 
 ---
 
@@ -280,6 +286,48 @@ For real MIND-style news recommendation, later stages will use models such as AL
 
 ---
 
+## MIND-small Data Processing
+
+The MIND-small pipeline currently produces cleaned interaction tables and sparse user-item matrices for downstream recommendation models.
+
+Processed interaction files:
+
+```text
+../data/processed/train_with_news.parquet
+../data/processed/dev_with_news.parquet
+../data/processed/news.parquet
+```
+
+ID mapping files:
+
+```text
+../data/processed/user_idx_map.json
+../data/processed/item_idx_map.json
+../data/processed/idx_user_map.json
+../data/processed/idx_item_map.json
+```
+
+Sparse matrix files:
+
+```text
+../data/processed/train_interactions.npz
+../data/processed/dev_interactions.npz
+```
+
+Latest sparse matrix results:
+
+```text
+train matrix shape: (50000, 51282)
+dev matrix shape: (50000, 51282)
+train nnz: 1148447
+dev nnz: 10277
+```
+
+The train matrix is built from positive train interactions. The dev matrix is built from clicked dev impressions, filtered to warm-start users/items, and cleaned by removing positive user-item pairs already seen in train.
+
+
+---
+
 ## Repository Structure
 
 ```text
@@ -287,9 +335,17 @@ recsys-news-debiasing/
 ├── README.md
 ├── requirements.txt
 ├── docs/
-│   └── 01_problem_formulation.md
+│   ├── 01_problem_formulation.md
+│   ├── decisions.md
+│   ├── experiments.md
+│   └── pitfalls.md
 ├── notebooks/
-│   └── 01_low_rank_recommender_toy_example.ipynb
+│   ├── 01_low_rank_recommender_toy_example.ipynb
+│   ├── 02_inspect_raw_mind_small.ipynb
+│   ├── 03_parse_impression_small.ipynb
+│   ├── 04_merge_news_metadata.py
+│   ├── 05_user_item_index_mapping.py
+│   └── 06_user_item_interaction_matrix.py
 └── src/
     ├── data/
     ├── models/
@@ -304,8 +360,12 @@ recsys-news-debiasing/
 
 * `README.md`: project overview, mathematical formulation, and progress tracking
 * `docs/01_problem_formulation.md`: detailed mathematical problem formulation
+* `docs/experiments.md`: experiment logs and data-processing results
+* `docs/decisions.md`: design decisions and evaluation protocol choices
+* `docs/pitfalls.md`: implementation pitfalls and fixes
 * `notebooks/01_low_rank_recommender_toy_example.ipynb`: toy low-rank recommender with hand-written truncated SVD
-* `requirements.txt`: Python dependencies for the current stage
+* `notebooks/05_user_item_index_mapping.py`: train-based user/item integer mappings
+* `notebooks/06_user_item_interaction_matrix.py`: sparse train/dev user-item matrix construction
 
 ---
 
@@ -324,22 +384,25 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-Register the Jupyter kernel:
+Register the Jupyter kernel if using notebooks:
 
 ```bash
 python -m ipykernel install --user --name recsys-news-debiasing
 ```
 
-Start Jupyter:
+Run the current MIND-small Part B scripts from the `notebooks/` directory:
 
 ```bash
-jupyter notebook
+cd notebooks
+python 05_user_item_index_mapping.py
+python 06_user_item_interaction_matrix.py
 ```
 
-Then open:
+The second script generates:
 
 ```text
-notebooks/01_low_rank_recommender_toy_example.ipynb
+../data/processed/train_interactions.npz
+../data/processed/dev_interactions.npz
 ```
 
 ---
@@ -356,6 +419,7 @@ scikit-learn
 matplotlib
 jupyter
 ipykernel
+pyarrow
 ```
 
 Later stages may add:
@@ -380,7 +444,11 @@ streamlit
 * [x] Hand-written truncated SVD
 * [x] Low-rank score matrix reconstruction
 * [x] Top-K recommendation generation
-* [ ] MIND-small data processing
+* [x] MIND-small raw data inspection
+* [x] Impression and history parsing
+* [x] News metadata merge
+* [x] Train-based user/item index mappings
+* [x] Sparse train/dev user-item matrices
 * [ ] Popularity baseline
 * [ ] ItemKNN / UserKNN
 * [ ] Sparse truncated SVD baseline on MIND
@@ -397,16 +465,17 @@ streamlit
 
 ## Next Steps
 
-The next stage will move from the toy matrix to the MIND-small dataset.
+The next stage is to implement classical recommendation baselines on the processed sparse matrices.
 
 Planned next steps:
 
-1. Download and inspect MIND-small.
-2. Parse `behaviors.tsv` and `news.tsv`.
-3. Construct a sparse user-item interaction matrix.
-4. Implement a popularity baseline.
-5. Implement classical recommender baselines such as ItemKNN, sparse truncated SVD, ALS, BPR, and LightFM.
-6. Evaluate models using top-K ranking metrics such as Recall@K, NDCG@K, MRR, and MAP.
+1. Load `train_interactions.npz` and `dev_interactions.npz`.
+2. Implement a popularity baseline.
+3. Implement sparse truncated SVD on MIND-small.
+4. Implement ALS for implicit matrix factorization.
+5. Add BPR if time allows.
+6. Implement ranking metrics such as Recall@K, NDCG@K, and MRR.
+7. Build a model comparison table under a consistent warm-start evaluation protocol.
 
 ---
 

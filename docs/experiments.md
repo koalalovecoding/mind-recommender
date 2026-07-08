@@ -441,3 +441,36 @@ collaborative filtering evaluation.
 For the current classical matrix-based recommender pipeline, Step 8 follows a warm-start evaluation setup: models 
 are trained on positive train interactions and evaluated on future dev impression clicks for users and items already 
 present in the train matrix.
+
+
+## 2026-07-07 Experiment: Phase 2 Part B Step 8 Sparse Matrix Construction
+
+**Goal.**
+Build train/dev sparse user-item interaction matrices from the cleaned MIND-small interaction tables.
+
+**Method.**
+The train matrix was built from `train_with_news.parquet` using all positive interactions where `click = 1`. The dev matrix was built from `dev_with_news.parquet` using clicked dev impressions only, where `click = 1` and `source = "impression"`. Dev pairs were filtered to keep only users and items that appear in the train-based ID mappings. Finally, dev positive `(user_id, item_id)` pairs that already appeared in train positives were removed.
+
+**Results.**
+
+```text
+dev clicked impression pairs before filtering: 110745
+dev warm-start pairs after user/item filtering: 10314
+dev positive pairs already seen in train: 37
+dev final positive pairs after removing train-seen pairs: 10277
+
+train matrix shape: (50000, 51282)
+dev matrix shape: (50000, 51282)
+train nnz: 1148447
+dev nnz: 10277
+```
+
+**Generated files.**
+
+```text
+../data/processed/train_interactions.npz
+../data/processed/dev_interactions.npz
+```
+
+**Conclusion.**
+Step 8 successfully created sparse train/dev interaction matrices with the same user/item index space. The dev matrix is a clean warm-start validation target: it uses clicked dev impressions, excludes cold-start users/items, and removes positive user-item pairs already seen in train.

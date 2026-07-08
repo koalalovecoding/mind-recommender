@@ -123,3 +123,15 @@ Possible strategies include popularity fallback, content-based recommendation, h
 produce representations from user/item features rather than relying only on historical interaction rows and columns.
 
 **Scope.**: Classical collaborative filtering models, sparse train/dev matrix construction, and standard ranking evaluation.
+
+## 2026-07-07   Remove train-seen positive pairs from dev evaluation
+
+**Decision.**
+When constructing the dev sparse matrix, remove any positive `(user_id, item_id)` pair that already appears as a positive pair in the train sparse matrix.
+
+**Reason.**
+In warm-start recommendation, the same user and the same item may appear in both train and dev, but the exact positive user-item interaction used for validation should not have already been used for training. If the same `(user_id, item_id)` positive pair appears in both train and dev, then the model has already seen that interaction as a training positive, which makes the validation target less clean.
+
+**Scope.**
+Sparse matrix construction and ranking evaluation for classical collaborative filtering models.
+
