@@ -126,4 +126,3 @@ print("dev warm-start pairs after user/item filtering:", len(dev_warm_start_pair
 print("dev positive pairs already seen in train:", num_seen_in_train)
 print("dev final positive pairs after removing train-seen pairs:", num_final_dev_pairs)
 
-print("Step 8 complete.")
