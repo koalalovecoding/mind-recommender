@@ -1132,3 +1132,318 @@ ALS recovered more relevant items because it used personalized latent user-item 
 The experiment successfully completed the initial ranking-evaluation stage and established a reproducible quantitative baseline for later FAISS retrieval, reranking, content enhancement, and debiasing experiments.
 
 
+## 2026-07-09 Experiment: Two-Stage ALS–Popularity Reranking Weight Ablation
+
+**Goal.**
+Evaluate the MIND-small two-stage recommendation pipeline and determine whether adding global item popularity to the second-stage reranker improves ranking quality over direct ALS recommendation.
+
+The two-stage pipeline is:
+
+```text
+ALS user factor
+→ FAISS inner-product retrieval
+→ filter train-seen items
+→ top-100 unseen candidates
+→ ALS and popularity reranking
+→ final top-K recommendations
+```
+
+The second-stage reranking score is:
+
+$$
+\text{rerank score}
+===================
+
+w_{\mathrm{ALS}}
+\cdot
+\text{normalized ALS score}
++
+w_{\mathrm{pop}}
+\cdot
+\text{normalized log-popularity},
+$$
+
+where:
+
+$$
+w_{\mathrm{ALS}}+w_{\mathrm{pop}}=1.
+$$
+
+The following configurations were tested:
+
+```text
+1.00 ALS + 0.00 Popularity
+0.99 ALS + 0.01 Popularity
+0.90 ALS + 0.10 Popularity
+0.50 ALS + 0.50 Popularity
+```
+
+All experiments used:
+
+```text
+Dataset: MIND-small
+Evaluable warm-start dev users: 5,109
+Candidate retrieval: FAISS IndexFlatIP
+Candidate set size: 100
+Evaluation K values: 10, 20, 40, 80
+Metrics: Recall, NDCG, MRR, MAP, and Hit Rate
+Retrieval Recall@100: 0.010841
+```
+
+---
+
+### Experiment 1: 1.00 ALS + 0.00 Popularity
+
+**Purpose.**
+Use ALS as the only second-stage signal. This experiment is a sanity check for the FAISS retrieval, train-seen filtering, reranking, and evaluation logic.
+
+### Results
+
+```text
+     Model  K   Recall     NDCG      MRR      MAP  HitRate
+Popularity 10 0.000000 0.000000 0.000000 0.000000 0.000000
+       ALS 10 0.001783 0.000916 0.000778 0.000546 0.003132
+  TwoStage 10 0.001783 0.000916 0.000778 0.000546 0.003132
+
+Popularity 20 0.000000 0.000000 0.000000 0.000000 0.000000
+       ALS 20 0.003258 0.001343 0.000961 0.000651 0.005676
+  TwoStage 20 0.003258 0.001343 0.000961 0.000651 0.005676
+
+Popularity 40 0.000525 0.000138 0.000051 0.000019 0.001370
+       ALS 40 0.005296 0.001831 0.001097 0.000718 0.009787
+  TwoStage 40 0.005296 0.001831 0.001097 0.000718 0.009787
+
+Popularity 80 0.001242 0.000271 0.000069 0.000032 0.002349
+       ALS 80 0.009650 0.002712 0.001243 0.000797 0.018203
+  TwoStage 80 0.009650 0.002712 0.001243 0.000797 0.018203
+```
+
+### Interpretation
+
+The TwoStage results exactly match the direct ALS results for every metric and every value of K.
+
+This is expected because both stages use the same ALS inner-product score:
+
+```text
+Stage 1:
+FAISS retrieves candidates using the ALS inner product.
+
+Stage 2:
+Candidates are reranked using only the ALS score.
+```
+
+Selecting the ALS top-100 candidates and then selecting the ALS top-K from those candidates is equivalent to directly selecting the ALS top-K from the complete item catalog.
+
+### Conclusion
+
+This experiment confirms that:
+
+```text
+1. FAISS retrieval reproduces the original ALS ranking.
+2. Train-seen item filtering is correct.
+3. The candidate set preserves the original ALS top-K items.
+4. The reranking implementation is correct.
+5. The TwoStage and direct ALS evaluations use the same users and ground truth.
+```
+
+The `1.00/0.00` configuration is therefore the pipeline-consistency baseline.
+
+---
+
+### Experiment 2: 0.99 ALS + 0.01 Popularity
+
+**Purpose.**
+Test whether a very small popularity contribution can improve ranking quality without substantially changing the personalized ALS ranking.
+
+### Results
+
+```text
+     Model  K   Recall     NDCG      MRR      MAP  HitRate
+Popularity 10 0.000000 0.000000 0.000000 0.000000 0.000000
+       ALS 10 0.001783 0.000916 0.000778 0.000546 0.003132
+  TwoStage 10 0.001783 0.000914 0.000778 0.000542 0.003132
+
+Popularity 20 0.000000 0.000000 0.000000 0.000000 0.000000
+       ALS 20 0.003258 0.001343 0.000961 0.000651 0.005676
+  TwoStage 20 0.003356 0.001367 0.000970 0.000652 0.005872
+
+Popularity 40 0.000525 0.000138 0.000051 0.000019 0.001370
+       ALS 40 0.005296 0.001831 0.001097 0.000718 0.009787
+  TwoStage 40 0.005492 0.001864 0.001101 0.000719 0.009982
+
+Popularity 80 0.001242 0.000271 0.000069 0.000032 0.002349
+       ALS 80 0.009650 0.002712 0.001243 0.000797 0.018203
+  TwoStage 80 0.009585 0.002693 0.001239 0.000792 0.018007
+```
+
+### Interpretation
+
+At `K=10`, Recall and Hit Rate remain unchanged, while NDCG and MAP decrease slightly. This means that the same number of relevant items is recovered, but some relevant items move to slightly lower positions.
+
+At `K=20` and `K=40`, the TwoStage model produces small improvements in Recall, NDCG, MRR, and Hit Rate.
+
+At `K=80`, the TwoStage model becomes slightly worse than direct ALS.
+
+The improvements are small and are not consistent across all values of K.
+
+### Conclusion
+
+A popularity weight of `0.01` causes only minor ranking changes. It provides a small improvement at `K=20` and `K=40`, but does not consistently outperform ALS.
+
+This configuration should be interpreted as a marginal and unstable result rather than a clear improvement.
+
+---
+
+### Experiment 3: 0.90 ALS + 0.10 Popularity
+
+**Purpose.**
+Evaluate whether a more substantial popularity contribution improves the second-stage ranking.
+
+### Results
+
+```text
+     Model  K   Recall     NDCG      MRR      MAP  HitRate
+Popularity 10 0.000000 0.000000 0.000000 0.000000 0.000000
+       ALS 10 0.001783 0.000916 0.000778 0.000546 0.003132
+  TwoStage 10 0.001669 0.000832 0.000701 0.000490 0.002740
+
+Popularity 20 0.000000 0.000000 0.000000 0.000000 0.000000
+       ALS 20 0.003258 0.001343 0.000961 0.000651 0.005676
+  TwoStage 20 0.003193 0.001288 0.000909 0.000598 0.005676
+
+Popularity 40 0.000525 0.000138 0.000051 0.000019 0.001370
+       ALS 40 0.005296 0.001831 0.001097 0.000718 0.009787
+  TwoStage 40 0.005264 0.001762 0.001031 0.000664 0.009395
+
+Popularity 80 0.001242 0.000271 0.000069 0.000032 0.002349
+       ALS 80 0.009650 0.002712 0.001243 0.000797 0.018203
+  TwoStage 80 0.009145 0.002548 0.001164 0.000734 0.017029
+```
+
+### Interpretation
+
+The `0.90/0.10` configuration performs worse than direct ALS for almost every metric and every value of K.
+
+At `K=10`, all five ranking metrics decrease. Similar degradation is observed at `K=20`, `K=40`, and `K=80`.
+
+The popularity feature changes the candidate ordering, but these changes generally move relevant items to worse positions or remove them from the evaluated top-K list.
+
+### Conclusion
+
+A popularity weight of `0.10` is too large for this reranking setup. Global item popularity weakens the personalized ALS ranking and reduces recommendation quality.
+
+---
+
+### Experiment 4: 0.50 ALS + 0.50 Popularity
+
+**Purpose.**
+Test the effect of assigning equal importance to personalized ALS relevance and global item popularity.
+
+### Results
+
+```text
+     Model  K   Recall     NDCG      MRR      MAP  HitRate
+Popularity 10 0.000000 0.000000 0.000000 0.000000 0.000000
+       ALS 10 0.001783 0.000916 0.000778 0.000546 0.003132
+  TwoStage 10 0.001294 0.000611 0.000453 0.000371 0.001762
+
+Popularity 20 0.000000 0.000000 0.000000 0.000000 0.000000
+       ALS 20 0.003258 0.001343 0.000961 0.000651 0.005676
+  TwoStage 20 0.002354 0.000918 0.000585 0.000443 0.003719
+
+Popularity 40 0.000525 0.000138 0.000051 0.000019 0.001370
+       ALS 40 0.005296 0.001831 0.001097 0.000718 0.009787
+  TwoStage 40 0.004260 0.001346 0.000688 0.000505 0.006851
+
+Popularity 80 0.001242 0.000271 0.000069 0.000032 0.002349
+       ALS 80 0.009650 0.002712 0.001243 0.000797 0.018203
+  TwoStage 80 0.007506 0.002019 0.000813 0.000562 0.013897
+```
+
+### Interpretation
+
+Giving popularity the same weight as ALS substantially reduces recommendation quality.
+
+At `K=10`, TwoStage Recall decreases from `0.001783` to `0.001294`, while Hit Rate decreases from `0.003132` to `0.001762`.
+
+The degradation remains substantial at `K=20`, `K=40`, and `K=80`.
+
+This shows that global popularity is not an adequate substitute for personalized ALS relevance.
+
+### Conclusion
+
+The `0.50/0.50` configuration performs substantially worse than direct ALS. Increasing the popularity weight causes the reranker to favor globally popular items at the expense of personalized relevance.
+
+---
+
+## Cross-Experiment Comparison
+
+The experiments show a clear relationship between popularity weight and ranking performance:
+
+```text
+Popularity weight = 0.00:
+TwoStage exactly reproduces direct ALS.
+
+Popularity weight = 0.01:
+Very small and inconsistent changes.
+Some improvement at K=20 and K=40, but no consistent gain.
+
+Popularity weight = 0.10:
+Recommendation quality generally decreases.
+
+Popularity weight = 0.50:
+Recommendation quality decreases substantially.
+```
+
+The results indicate that increasing the global popularity contribution progressively weakens personalized ranking quality.
+
+A useful summary at `K=10` is:
+
+```text
+ALS weight  Popularity weight  Recall@10  NDCG@10  MRR@10   MAP@10   HitRate@10
+1.00        0.00               0.001783   0.000916 0.000778 0.000546 0.003132
+0.99        0.01               0.001783   0.000914 0.000778 0.000542 0.003132
+0.90        0.10               0.001669   0.000832 0.000701 0.000490 0.002740
+0.50        0.50               0.001294   0.000611 0.000453 0.000371 0.001762
+```
+
+---
+
+## Overall Conclusion
+
+The two-stage pipeline was implemented correctly:
+
+```text
+1. ALS user and item factors were loaded successfully.
+2. FAISS inner-product search retrieved ALS-based candidates.
+3. Train-seen items were removed.
+4. One hundred unseen candidates were retained.
+5. Candidates were reranked and evaluated.
+6. The ALS-only configuration exactly reproduced direct ALS metrics.
+```
+
+However, global item popularity did not provide a reliable second-stage ranking improvement.
+
+The `1.00 ALS + 0.00 Popularity` experiment confirms that the two-stage infrastructure is correct. The later experiments show that adding global popularity produces mixed results at very small weights and clear degradation at larger weights.
+
+The likely reason is that global popularity is neither personalized nor sufficiently time-sensitive for news recommendation. Training-period popularity may favor broadly popular or older articles rather than the specific future articles clicked by individual users.
+
+Therefore, the current results support the following conclusion:
+
+```text
+The FAISS two-stage pipeline is correct, but static global popularity
+is not an effective reranking feature for this MIND-small setup.
+```
+
+More informative second-stage features should be explored later, including:
+
+```text
+news recency
+category and subcategory match
+user recent category preference
+title or abstract similarity
+user-history text similarity
+exposure-based or propensity-based features
+```
+
+A learned ranker such as Logistic Regression, LightGBM, or a neural ranking model could then combine these features instead of relying on manually selected weights.
