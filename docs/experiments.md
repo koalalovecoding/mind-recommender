@@ -1447,3 +1447,1174 @@ exposure-based or propensity-based features
 ```
 
 A learned ranker such as Logistic Regression, LightGBM, or a neural ranking model could then combine these features instead of relying on manually selected weights.
+
+
+
+## 2026-07-10 Experiment: Full MIND Raw Data Size Check
+
+**Goal.**  
+Verify that the Full MIND train/dev files were downloaded and extracted correctly, and record the raw dataset scale before implementing streaming data processing.
+
+### Files checked
+
+```text
+data/raw/MINDlarge_train/behaviors.tsv
+data/raw/MINDlarge_train/news.tsv
+data/raw/MINDlarge_dev/behaviors.tsv
+data/raw/MINDlarge_dev/news.tsv
+```
+
+The extracted directories also contain:
+
+```text
+entity_embedding.vec
+relation_embedding.vec
+```
+
+These embedding files are not used in the current collaborative-filtering and ALS pipeline.
+
+### Method
+
+I first inspected the extracted files and their approximate sizes using:
+
+```bash
+ls -lh data/raw/MINDlarge_train
+ls -lh data/raw/MINDlarge_dev
+```
+
+I then counted the number of rows in the behavior and news files using:
+
+```bash
+wc -l \
+data/raw/MINDlarge_train/behaviors.tsv \
+data/raw/MINDlarge_train/news.tsv \
+data/raw/MINDlarge_dev/behaviors.tsv \
+data/raw/MINDlarge_dev/news.tsv
+```
+
+### File sizes
+
+```text
+MINDlarge_train/behaviors.tsv           1.3 GB
+MINDlarge_train/news.tsv                 81 MB
+MINDlarge_train/entity_embedding.vec     38 MB
+MINDlarge_train/relation_embedding.vec  1.0 MB
+
+MINDlarge_dev/behaviors.tsv             220 MB
+MINDlarge_dev/news.tsv                   56 MB
+MINDlarge_dev/entity_embedding.vec       30 MB
+MINDlarge_dev/relation_embedding.vec    1.0 MB
+```
+
+### Row counts
+
+```text
+Train behavior rows: 2,232,748
+Train news rows:       101,527
+
+Dev behavior rows:     376,471
+Dev news rows:          72,023
+```
+
+### Combined raw scale
+
+```text
+Total behavior rows: 2,609,219
+Total news rows:       173,550
+```
+
+Each row in `behaviors.tsv` represents an impression event rather than a unique user. A single behavior row may contain a user history and many candidate news items inside the `impressions` field.
+
+The combined number of news rows is not the final number of unique news items because the train and dev `news.tsv` files may contain overlapping `news_id` values. The final item count will be determined after combining the train/dev news metadata and removing duplicate news IDs.
+
+### Interpretation
+
+The Full MIND behavior files are substantially larger than the MIND-small files. In particular, the train behavior file alone contains more than 2.2 million impression events and occupies approximately 1.3 GB.
+
+Expanding every exposed candidate item, including all `-0` non-clicked impressions, into one in-memory pandas DataFrame would create a much larger interaction table and could exceed local memory.
+
+Therefore, the Full MIND data pipeline should use streaming or chunk-based processing rather than loading and expanding the complete behavior logs in memory at once.
+
+For the initial ALS training matrix, the processing pipeline will extract positive implicit-feedback interactions from:
+
+```text
+1. News items in the user history field.
+2. Impression items whose click label is 1.
+```
+
+Exposed-but-not-clicked items with label `0` will not be inserted as positive entries in the sparse ALS interaction matrix.
+
+### Conclusion
+
+The Full MIND train and dev datasets were downloaded and extracted successfully. The required `behaviors.tsv` and `news.tsv` files exist and have reasonable sizes and row counts.
+
+The raw dataset is ready for streaming interaction processing, train-based user/item mapping construction, sparse matrix generation, and implicit ALS training.
+
+
+## 2026-07-10 Experiment: Full MIND Streaming Positive-Interaction Processing
+
+**Goal.**  
+Process the Full MIND train/dev behavior logs without loading the complete dataset into memory, extract the positive implicit-feedback interactions needed for ALS, and save the results as partitioned Parquet files.
+
+### Input files
+
+```text
+data/raw/MINDlarge_train/behaviors.tsv
+data/raw/MINDlarge_dev/behaviors.tsv
+```
+
+### Processing strategy
+
+The Full MIND behavior files are too large to expand into one complete in-memory pandas DataFrame.
+
+The script therefore reads each `behaviors.tsv` file line by line and keeps only a limited number of extracted interactions in memory.
+
+The buffer size was configured as:
+
+```text
+500,000 interaction rows
+```
+
+When the buffer reached approximately 500,000 rows, the script:
+
+```text
+1. Converted the buffered interactions into a pandas DataFrame.
+2. Saved the DataFrame as one compressed Parquet part file.
+3. Cleared the in-memory buffers.
+4. Continued processing the remaining behavior rows.
+```
+
+This streaming design prevents memory usage from growing with the total dataset size.
+
+### Positive-interaction definitions
+
+For the training split, the script extracted:
+
+```text
+1. Every item appearing in the user's history field.
+2. Every item in the impressions field with click label = 1.
+```
+
+For the development split, the script extracted:
+
+```text
+1. Only items in the impressions field with click label = 1.
+```
+
+Dev history was intentionally excluded because it represents previous user behavior rather than the future validation targets that the recommender should recover.
+
+Impression items with click label `0` were not saved in this step because the current goal is to construct a positive implicit-feedback sparse matrix for ALS.
+
+### Command
+
+The script was executed from the project root using:
+
+```bash
+python -u notebooks/11_parse_mind_large_streaming.py
+```
+
+The `-u` option runs Python with unbuffered standard output, so progress messages and errors appear in the terminal immediately.
+
+### Train results
+
+```text
+Raw behavior rows:                 2,232,748
+History interaction occurrences: 73,629,868
+Clicked impression occurrences:   3,383,656
+Total positive rows written:     77,013,524
+Parquet part files:                     155
+Malformed behavior rows:                   0
+Malformed impression tokens:               0
+Processing time:                        30.23 seconds
+```
+
+### Dev results
+
+```text
+Raw behavior rows:                   376,471
+History interaction occurrences:          0
+Clicked impression occurrences:      574,845
+Total positive rows written:         574,845
+Parquet part files:                        2
+Malformed behavior rows:                  0
+Malformed impression tokens:              0
+Processing time:                        1.99 seconds
+```
+
+### Why the train output contains 155 Parquet files
+
+The train split produced:
+
+```text
+77,013,524 positive interaction rows
+```
+
+The configured buffer size was:
+
+```text
+500,000 rows per Parquet part
+```
+
+Therefore:
+
+```text
+77,013,524 / 500,000 ≈ 154.03
+```
+
+The output consists of:
+
+```text
+154 files containing approximately 500,000 rows each
+1 final file containing the remaining rows
+155 Parquet files in total
+```
+
+The files are named sequentially:
+
+```text
+part-00000.parquet
+part-00001.parquet
+part-00002.parquet
+...
+part-00154.parquet
+```
+
+These 155 files are not separate datasets. Together, they form one logical Full MIND training positive-interaction dataset.
+
+The dev split produced two files because:
+
+```text
+574,845 / 500,000 ≈ 1.15
+```
+
+Therefore, the dev output contains:
+
+```text
+1 file with approximately 500,000 rows
+1 file with the remaining 74,845 rows
+```
+
+### Generated files
+
+```text
+data/processed/mindlarge/train_positive_interactions/
+    part-00000.parquet
+    part-00001.parquet
+    ...
+    part-00154.parquet
+
+data/processed/mindlarge/dev_clicked_impressions/
+    part-00000.parquet
+    part-00001.parquet
+
+data/processed/mindlarge/11_streaming_parse_summary.json
+```
+
+Each Parquet interaction row contains:
+
+```text
+user_id
+item_id
+click
+source
+```
+
+All saved rows have:
+
+```text
+click = 1
+```
+
+The `source` field is:
+
+```text
+history
+```
+
+or:
+
+```text
+impression
+```
+
+### Important interpretation
+
+The value:
+
+```text
+77,013,524
+```
+
+represents positive interaction occurrences, not unique user-item pairs.
+
+The same `(user_id, item_id)` pair may appear multiple times, especially because a previously clicked news item can appear repeatedly in a user's history across multiple behavior events.
+
+For example:
+
+```text
+Behavior 1 history: N1 N2
+Behavior 2 history: N1 N2 N3
+Behavior 3 history: N1 N2 N3 N4
+```
+
+The pair involving `N1` may be written three times during streaming, but the final binary interaction matrix should still contain:
+
+```text
+R[user, N1] = 1
+```
+
+rather than a value of 3.
+
+Global deduplication was intentionally not performed during streaming because maintaining all unique user-item pairs in one in-memory Python object would undermine the memory-safe processing design.
+
+Duplicate coordinates will be consolidated later when constructing the binary sparse user-item matrix.
+
+### Comparison with MIND-small processing
+
+For MIND-small, the expanded interaction tables could be loaded and processed as complete pandas DataFrames.
+
+The MIND-small pipeline could directly use operations such as:
+
+```python
+drop_duplicates(subset=["user_id", "item_id"])
+```
+
+over the complete interaction table.
+
+For Full MIND, the train behavior file contains more than 2.2 million behavior events, and the positive-interaction extraction alone produced more than 77 million rows.
+
+Therefore, the Full MIND pipeline uses:
+
+```text
+line-by-line input reading
+→ bounded in-memory buffers
+→ multiple Parquet output parts
+→ delayed global deduplication
+→ later sparse matrix construction
+```
+
+The semantic definitions remain consistent with the MIND-small pipeline:
+
+```text
+Train:
+history clicks + clicked train impressions
+
+Dev ground truth:
+clicked dev impressions only
+```
+
+The difference is primarily an engineering and memory-management change required to scale the pipeline.
+
+### Validation checks
+
+The following checks passed:
+
+```text
+1. All 2,232,748 train behavior rows were processed.
+2. All 376,471 dev behavior rows were processed.
+3. The number of rows written matched the number of extracted interactions.
+4. No malformed behavior rows were detected.
+5. No malformed impression tokens were detected.
+6. Train history and clicked impressions were both extracted.
+7. Dev history was excluded.
+8. Output files were saved as partitioned Parquet datasets.
+9. A JSON processing summary was saved successfully.
+```
+
+### Conclusion
+
+The Full MIND train and dev behavior logs were processed successfully using a memory-safe streaming pipeline.
+
+The script extracted:
+
+```text
+77,013,524 train positive interaction occurrences
+574,845 dev clicked-impression occurrences
+```
+
+and saved them as partitioned Parquet files without loading the complete expanded dataset into memory.
+
+The outputs are ready for train-based user/item mapping construction, global user-item deduplication, binary sparse matrix generation, and implicit ALS training.
+
+
+
+
+
+## 2026-07-10 Experiment: Build Full MIND User and Item Mappings
+
+**Goal.**  
+Create train-based integer mappings for all Full MIND users and news items.
+
+### Method
+
+The mappings were built directly from the raw training files:
+
+```text
+MINDlarge_train/behaviors.tsv → unique user IDs
+MINDlarge_train/news.tsv      → unique news IDs
+```
+
+The IDs were sorted before assigning indices so that the mappings are deterministic and reproducible.
+
+### Results
+
+```text
+Train behavior rows: 2,232,748
+Unique train users:   711,222
+
+Train news rows:      101,527
+Unique train items:   101,527
+
+Expected matrix shape:
+(711,222, 101,527)
+
+Processing time:
+approximately 3.2 seconds
+```
+
+No malformed behavior or news rows were found.
+
+### Generated files
+
+```text
+data/processed/mindlarge/user_idx_map.json
+data/processed/mindlarge/item_idx_map.json
+data/processed/mindlarge/idx_user_map.json
+data/processed/mindlarge/idx_item_map.json
+```
+
+### Conclusion
+
+The Full MIND train user and item spaces were 
+mapped successfully. The same global mappings 
+will be used across all Parquet interaction 
+partitions when constructing the sparse user-item matrix.
+
+## 2026-07-10 Experiment: Build Full MIND Sparse Interaction Matrices
+
+**Goal.**  
+Construct binary train/dev CSR user-item matrices for Full MIND using the train-based mappings.
+
+### Method
+
+The 155 train Parquet parts were processed in batches of 10. Each batch was mapped to integer user/item indices, converted into a binary sparse matrix, and merged using element-wise maximum so repeated user-item pairs remained equal to 1.
+
+The dev matrix used clicked dev impressions only. Cold-start users/items and train-seen user-item pairs were removed.
+
+### Results
+
+```text
+Matrix shape: (711,222, 101,527)
+
+Train:
+Parquet parts:          155
+Raw positive rows:      77,013,524
+Unique positive pairs:  16,532,504
+Density:                0.0002289559
+
+Dev:
+Parquet parts:          2
+Raw clicked rows:       574,845
+Warm-start rows:        463,600
+Cold-start users:       39,212
+Cold-start items:       1,359
+Train-seen pairs removed: 1,702
+Final positive pairs:   459,068
+Density:                0.0000063576
+
+Processing time:        56.62 seconds
+```
+
+### Generated files
+
+```text
+data/processed/mindlarge/train_interactions.npz
+data/processed/mindlarge/dev_interactions.npz
+```
+
+### Conclusion
+
+The Full MIND sparse matrices were constructed successfully.
+ Duplicate positive occurrences were consolidated into binary 
+ user-item pairs, and the dev matrix follows the same warm-start evaluation protocol used for MIND-small.
+
+
+## 2026-07-10 Experiment: Train Implicit ALS on Full MIND
+
+**Goal.**  
+Train an implicit-feedback ALS model on the Full MIND binary user-item interaction matrix and save the learned user/item latent factors.
+
+### Training data
+
+```text
+Train matrix shape: (711,222, 101,527)
+Unique positive pairs: 16,532,504
+Matrix dtype: float32
+```
+
+### Model configuration
+
+```text
+factors:        64
+regularization: 0.1
+alpha:          40.0
+iterations:     15
+random_state:   42
+use_gpu:        False
+```
+
+### Results
+
+```text
+Training time:       88.91 seconds
+Average time/round:   approximately 5.91 seconds
+
+User factors shape:  (711,222, 64)
+Item factors shape:  (101,527, 64)
+Factor dtype:        float32
+```
+
+The model learned one 64-dimensional latent vector for every train user and every train news item.
+
+### Generated files
+
+```text
+data/processed/mindlarge/als_model.npz
+data/processed/mindlarge/als_user_factors.npy
+data/processed/mindlarge/als_item_factors.npy
+```
+
+### Conclusion
+
+Implicit ALS was trained successfully on Full MIND. The saved user and item factors can now be used for personalized top-K recommendation, FAISS candidate retrieval, and ranking evaluation.
+
+
+## 2026-07-10 Experiment: Full MIND Popularity and ALS Sample Recommendations
+
+**Goal.**
+Verify that the Full MIND interaction matrix and saved ALS factors can generate valid Popularity and personalized ALS recommendations.
+
+**Input files.**
+
+```text
+data/processed/mindlarge/train_interactions.npz
+data/processed/mindlarge/als_user_factors.npy
+data/processed/mindlarge/als_item_factors.npy
+data/processed/mindlarge/idx_user_map.json
+data/processed/mindlarge/idx_item_map.json
+data/raw/MINDlarge_train/news.tsv
+```
+
+**Method.**
+
+```text
+1. Loaded the Full MIND binary train interaction matrix.
+2. Calculated item popularity as the number of unique train users who clicked each item.
+3. Selected the first user with a nonempty train history.
+4. Generated the user's top-10 unseen Popularity recommendations.
+5. Computed ALS scores using the user-item factor dot product.
+6. Removed items already clicked by the user in train.
+7. Generated the user's top-10 unseen ALS recommendations.
+8. Mapped item indices back to news IDs and titles.
+9. Saved the popularity features and sample recommendation results.
+```
+
+The ALS score was computed as:
+
+```text
+ALS score(u, i) = user_factor[u] · item_factor[i]
+```
+
+The score is a ranking score, not a calibrated click probability.
+
+### Results
+
+```text
+Train matrix shape: (711222, 101527)
+Sample user index: 0
+Sample user ID: U0
+Sample user train clicks: 11
+Popularity recommendations generated: 10
+ALS recommendations generated: 10
+```
+
+The Popularity model recommended globally popular unseen news items, while ALS produced a personalized ranking based on the latent factor representation of user `U0`.
+
+For the sample user U0, only one item appeared in both top-10 lists, showing that the personalized ALS ranking differed substantially from the Popularity ranking for this example.
+
+### Validation checks
+
+```text
+1. User-factor dimensions matched the train matrix users.
+2. Item-factor dimensions matched the train matrix items.
+3. Train-seen items were excluded from both recommendation lists.
+4. ALS scores matched direct user-item factor dot products.
+5. Item indices were successfully mapped to news IDs and titles.
+6. Both output lists contained ten recommendations.
+```
+
+**Generated files.**
+
+```text
+data/processed/mindlarge/popularity_scores.npy
+data/processed/mindlarge/popularity_ranking.npy
+data/processed/mindlarge/popularity_sample_top10.csv
+data/processed/mindlarge/als_sample_top10.csv
+```
+
+**Conclusion.**
+Step 15 was completed successfully. The Full MIND pipeline can now calculate item popularity and generate valid unseen top-10 recommendations using both the non-personalized Popularity baseline and personalized ALS latent-factor scores. The saved outputs are ready for Full MIND ranking evaluation and the later FAISS two-stage pipeline.
+
+
+
+## 2026-07-10 Experiment: Full MIND Popularity and ALS Ranking Evaluation
+
+**Goal.**
+Evaluate the Full MIND Popularity baseline and implicit ALS model under the same warm-start whole-catalog ranking protocol.
+
+**Evaluation setup.**
+
+```text
+Train matrix shape: (711222, 101527)
+Dev positive pairs: 459068
+Evaluated users: 205536
+Candidate universe: 101527 train-known news items
+K values: 10, 20, 40, 80
+Metrics: Recall, NDCG, MRR, MAP, Hit Rate
+```
+
+Only users with at least one valid dev positive item were included. Items already clicked by each user in train were removed from the recommendation results.
+
+### Results
+
+```text
+     Model  K   Recall     NDCG      MRR      MAP  HitRate
+Popularity 10 0.000000 0.000000 0.000000 0.000000 0.000000
+       ALS 10 0.001172 0.000670 0.000800 0.000359 0.002632
+
+Popularity 20 0.000007 0.000003 0.000002 0.000000 0.000034
+       ALS 20 0.002250 0.001004 0.000972 0.000430 0.005211
+
+Popularity 40 0.000779 0.000200 0.000067 0.000028 0.001786
+       ALS 40 0.004535 0.001578 0.001148 0.000510 0.010319
+
+Popularity 80 0.001092 0.000262 0.000077 0.000034 0.002394
+       ALS 80 0.008415 0.002398 0.001299 0.000578 0.019053
+```
+
+### Interpretation
+
+ALS outperformed the static Popularity baseline for every metric and every tested value of K.
+
+At `K = 80`:
+
+```text
+ALS Recall@80:        0.008415
+Popularity Recall@80: 0.001092
+
+ALS HitRate@80:        0.019053
+Popularity HitRate@80: 0.002394
+```
+
+ALS achieved approximately 7.7 times the Recall and 8.0 times the Hit Rate of Popularity at `K = 80`.
+
+Popularity produced almost no hits at small K, indicating that globally popular train-period news items had very limited overlap with future dev clicks. ALS performed better because it used personalized latent user-item interaction patterns.
+
+Absolute metric values remained low because this was a whole-catalog retrieval task over more than 100,000 news items, with strong sparsity and temporal drift.
+
+**Generated file.**
+
+```text
+data/processed/mindlarge/ranking_evaluation.csv
+```
+
+**Conclusion.**
+The Full MIND ranking evaluation completed successfully. Personalized ALS consistently outperformed the static Popularity baseline, establishing the direct ALS results that will be used as the baseline for the Full MIND FAISS two-stage pipeline.
+
+
+
+## 2026-07-10 Experiment: Full MIND Two-Stage FAISS Retrieval and Heuristic Reranking
+
+**Goal.**
+Build and evaluate a Full MIND two-stage recommendation pipeline using ALS latent factors for FAISS candidate retrieval and a heuristic ALS-plus-popularity reranker.
+
+The pipeline is:
+
+```text
+ALS user factor
+→ FAISS inner-product retrieval
+→ remove train-seen items
+→ retain top-100 unseen candidates
+→ heuristic reranking
+→ evaluate final top-K recommendations
+```
+
+The experiment also directly compares:
+
+```text
+Popularity
+ALS
+TwoStageHeuristic
+```
+
+at:
+
+```text
+K = 10
+K = 20
+K = 40
+K = 80
+```
+
+---
+
+### Input files
+
+```text
+data/processed/mindlarge/train_interactions.npz
+data/processed/mindlarge/dev_interactions.npz
+data/processed/mindlarge/als_user_factors.npy
+data/processed/mindlarge/als_item_factors.npy
+data/processed/mindlarge/popularity_scores.npy
+data/processed/mindlarge/ranking_evaluation.csv
+data/processed/mindlarge/idx_user_map.json
+data/processed/mindlarge/idx_item_map.json
+data/raw/MINDlarge_train/news.tsv
+```
+
+---
+
+### Evaluation setup
+
+The experiment used the same warm-start whole-catalog evaluation protocol as Step 16.
+
+```text
+Train-known users:        711,222
+Train-known items:        101,527
+Valid dev positive pairs: 459,068
+Evaluated users:          205,536
+```
+
+Only users with at least one valid dev positive interaction were evaluated.
+
+For each user:
+
+```text
+1. Use the ALS user factor as the FAISS query vector.
+2. Search the Full MIND item-factor index.
+3. Retrieve extra items so that 100 unseen candidates remain after filtering.
+4. Remove items already clicked by the user in train.
+5. Retain exactly 100 unique unseen candidates.
+6. Recompute exact ALS scores for the candidates.
+7. Add a log-transformed popularity feature.
+8. Rerank the 100 candidates.
+9. Evaluate the reranked list at K = 10, 20, 40, and 80.
+```
+
+---
+
+### FAISS index
+
+The item-factor matrix was indexed using:
+
+```python
+faiss.IndexFlatIP
+```
+
+The index performs exact maximum-inner-product search.
+
+Because ALS scores are calculated as:
+
+```text
+score(u, i) = user_factor[u] · item_factor[i]
+```
+
+the FAISS inner-product score should match the original ALS dot-product score.
+
+### FAISS validation result
+
+```text
+FAISS index build time: 0.0144 seconds
+Maximum FAISS score error: 5.960464477539063e-08
+```
+
+The maximum numerical difference was far below the validation tolerance of `1e-5`.
+
+This confirms that:
+
+```text
+FAISS inner-product retrieval
+≈
+direct ALS user-item dot-product scoring
+```
+
+---
+
+### Heuristic reranker
+
+The reranker used:
+
+```text
+ALS weight:        0.99
+Popularity weight: 0.01
+```
+
+For each user, the candidate features were calculated as:
+
+```text
+normalized ALS score
+normalized log-popularity score
+```
+
+The popularity feature was:
+
+```python
+np.log1p(popularity[candidate_items])
+```
+
+The final heuristic score was:
+
+```text
+rerank_score
+=
+0.99 × normalized_ALS
++
+0.01 × normalized_log_popularity
+```
+
+The logarithmic transformation compresses extreme popularity values before min-max normalization and prevents a small number of highly popular articles from dominating the combined score.
+
+---
+
+### ALS-only pipeline sanity check
+
+Before evaluating the heuristic configuration, the reranker was tested using:
+
+```text
+ALS weight:        1.0
+Popularity weight: 0.0
+```
+
+The two-stage pipeline exactly reproduced the direct ALS metrics at all evaluated values of K.
+
+```text
+ALS-only pipeline sanity check passed.
+```
+
+This validates that:
+
+```text
+FAISS retrieval
+→ train-seen filtering
+→ top-100 candidate construction
+→ reranking
+```
+
+does not change the original ALS ranking when the popularity feature is disabled.
+
+Therefore, any metric difference in the `0.99 + 0.01` experiment is caused by the popularity reranking component rather than by FAISS retrieval.
+
+---
+
+### Candidate retrieval result
+
+```text
+Candidate Recall@100: 0.010355
+```
+
+Candidate Recall@100 measures the fraction of valid dev relevant items contained anywhere in the 100-item FAISS candidate set before final reranking.
+
+The value is identical for `K = 10, 20, 40, and 80` because all final evaluations use the same top-100 candidate set.
+
+---
+
+### Two-stage ranking results
+
+```text
+            Model  K  EvaluatedUsers   Recall     NDCG      MRR      MAP  HitRate  CandidateRecall@100  ALSWeight  PopularityWeight
+TwoStageHeuristic 10          205536 0.001158 0.000662 0.000791 0.000354 0.002613             0.010355       0.99              0.01
+TwoStageHeuristic 20          205536 0.002241 0.000998 0.000964 0.000426 0.005196             0.010355       0.99              0.01
+TwoStageHeuristic 40          205536 0.004513 0.001568 0.001138 0.000505 0.010246             0.010355       0.99              0.01
+TwoStageHeuristic 80          205536 0.008390 0.002387 0.001289 0.000574 0.018999             0.010355       0.99              0.01
+```
+
+As K increased, Recall and Hit Rate also increased because longer recommendation lists had more opportunities to include a relevant item.
+
+```text
+Recall@10: 0.001158
+Recall@20: 0.002241
+Recall@40: 0.004513
+Recall@80: 0.008390
+```
+
+```text
+HitRate@10: 0.002613
+HitRate@20: 0.005196
+HitRate@40: 0.010246
+HitRate@80: 0.018999
+```
+
+Recall@80 remained below Candidate Recall@100:
+
+```text
+Recall@80:             0.008390
+Candidate Recall@100:  0.010355
+```
+
+This indicates that some relevant items were successfully retrieved into the top-100 candidate set but remained between ranks 81 and 100 after reranking.
+
+---
+
+### Popularity versus ALS versus TwoStage
+
+```text
+            Model  K  EvaluatedUsers   Recall     NDCG      MRR      MAP  HitRate  CandidateRecall@100  ALSWeight  PopularityWeight
+       Popularity 10          205536 0.000000 0.000000 0.000000 0.000000 0.000000                  NaN        NaN               NaN
+              ALS 10          205536 0.001172 0.000670 0.000800 0.000359 0.002632                  NaN        NaN               NaN
+TwoStageHeuristic 10          205536 0.001158 0.000662 0.000791 0.000354 0.002613             0.010355       0.99              0.01
+
+       Popularity 20          205536 0.000007 0.000003 0.000002 0.000000 0.000034                  NaN        NaN               NaN
+              ALS 20          205536 0.002250 0.001004 0.000972 0.000430 0.005211                  NaN        NaN               NaN
+TwoStageHeuristic 20          205536 0.002241 0.000998 0.000964 0.000426 0.005196             0.010355       0.99              0.01
+
+       Popularity 40          205536 0.000779 0.000200 0.000067 0.000028 0.001786                  NaN        NaN               NaN
+              ALS 40          205536 0.004535 0.001578 0.001148 0.000510 0.010319                  NaN        NaN               NaN
+TwoStageHeuristic 40          205536 0.004513 0.001568 0.001138 0.000505 0.010246             0.010355       0.99              0.01
+
+       Popularity 80          205536 0.001092 0.000262 0.000077 0.000034 0.002394                  NaN        NaN               NaN
+              ALS 80          205536 0.008415 0.002398 0.001299 0.000578 0.019053                  NaN        NaN               NaN
+TwoStageHeuristic 80          205536 0.008390 0.002387 0.001289 0.000574 0.018999             0.010355       0.99              0.01
+```
+
+---
+
+### Result 1: ALS outperformed Popularity
+
+Direct ALS achieved substantially higher values than the static Popularity baseline at every evaluated K.
+
+At `K = 80`:
+
+```text
+Popularity Recall@80: 0.001092
+ALS Recall@80:        0.008415
+```
+
+ALS achieved approximately:
+
+```text
+0.008415 / 0.001092 ≈ 7.7
+```
+
+times the Recall of Popularity.
+
+For Hit Rate:
+
+```text
+Popularity HitRate@80: 0.002394
+ALS HitRate@80:        0.019053
+```
+
+ALS achieved approximately eight times the Hit Rate of Popularity.
+
+This confirms that personalized latent-factor scores provide substantially more useful ranking signal than static global train-period popularity.
+
+---
+
+### Result 2: The heuristic reranker did not improve direct ALS
+
+The `0.99 ALS + 0.01 popularity` configuration performed slightly below direct ALS at every value of K.
+
+At `K = 10`:
+
+```text
+ALS Recall@10:        0.001172
+TwoStage Recall@10:   0.001158
+
+ALS NDCG@10:          0.000670
+TwoStage NDCG@10:     0.000662
+```
+
+At `K = 80`:
+
+```text
+ALS Recall@80:        0.008415
+TwoStage Recall@80:   0.008390
+
+ALS NDCG@80:          0.002398
+TwoStage NDCG@80:     0.002387
+```
+
+The differences were small, but consistently negative across Recall, NDCG, MRR, MAP, and Hit Rate.
+
+The correct conclusion is:
+
+```text
+Adding a 1% static popularity contribution slightly degraded
+ranking quality compared with direct ALS under the current
+Full MIND whole-catalog evaluation protocol.
+```
+
+---
+
+### Result 3: The performance difference came from reranking, not retrieval
+
+The ALS-only sanity check reproduced direct ALS exactly.
+
+Therefore, FAISS candidate retrieval did not cause the observed metric reduction.
+
+The reduction occurred because the popularity feature changed the ordering of some candidates near the evaluation boundaries:
+
+```text
+rank 10 versus rank 11
+rank 20 versus rank 21
+rank 40 versus rank 41
+rank 80 versus rank 81
+```
+
+Even a small popularity weight can change these positions because both ALS and popularity features are independently min-max normalized within each user's 100-item candidate set.
+
+---
+
+### Result 4: Static popularity was not useful for future news ranking
+
+The standalone Popularity baseline was weak, especially at small K:
+
+```text
+Popularity Recall@10: 0.000000
+Popularity Recall@20: 0.000007
+```
+
+News popularity changes rapidly over time. An article that received many clicks during the training period may no longer be current or relevant during the dev period.
+
+Therefore, static cumulative popularity may promote historically popular but temporally stale articles.
+
+The experiment suggests that the limitation is not primarily caused by numerical scaling because the popularity feature already used:
+
+```text
+log transformation
+→ candidate-level normalization
+```
+
+Instead, static train-period popularity itself contains limited predictive information for future news clicks.
+
+Possible future improvements include:
+
+```text
+time-decayed popularity
+recent-window popularity
+article recency
+category-aware popularity
+user-specific category preference
+learned reranking
+```
+
+---
+
+### Sample recommendation output
+
+The pipeline generated and saved a readable top-10 recommendation list for sample user:
+
+```text
+user_idx: 0
+user_id:  U0
+```
+
+For this user, the final top-10 retained the same retrieval ranks as the original ALS order:
+
+```text
+retrieval ranks 1 through 10
+```
+
+This means the `1%` popularity feature did not change this sample user's first ten recommendations, although it changed rankings for some other users in the full evaluation.
+
+---
+
+### Latency results
+
+```text
+FAISS index build time:             0.0144 seconds
+Candidate retrieval time:          42.4406 seconds
+Candidate retrieval latency:        0.2065 ms/user
+Filtering and reranking time:       16.3308 seconds
+Filtering and reranking latency:     0.0795 ms/user
+End-to-end evaluation time:         80.8330 seconds
+End-to-end latency:                  0.3933 ms/user
+```
+
+The heuristic reranker added only a small amount of computation:
+
+```text
+0.0795 ms per user
+```
+
+The FAISS retrieval stage required approximately:
+
+```text
+0.2065 ms per user
+```
+
+The reported end-to-end latency also includes Python control flow and ranking-metric evaluation, so it should not be interpreted as pure online serving latency.
+
+Nevertheless, the experiment demonstrates that the Full MIND two-stage pipeline can process recommendations at sub-millisecond average time per evaluated user in the current offline implementation.
+
+---
+
+### Generated files
+
+```text
+data/processed/mindlarge/two_stage_candidates_sample.csv
+data/processed/mindlarge/two_stage_top10.csv
+data/processed/mindlarge/two_stage_evaluation.csv
+data/processed/mindlarge/two_stage_model_comparison.csv
+data/processed/mindlarge/two_stage_latency.json
+```
+
+`two_stage_candidates_sample.csv` contains the 100 FAISS candidates for the sample user.
+
+`two_stage_top10.csv` contains the final readable top-10 recommendation list.
+
+`two_stage_evaluation.csv` contains the TwoStage metrics at:
+
+```text
+K = 10, 20, 40, 80
+```
+
+`two_stage_model_comparison.csv` contains the direct comparison among:
+
+```text
+Popularity
+ALS
+TwoStageHeuristic
+```
+
+`two_stage_latency.json` stores index construction, retrieval, reranking, and end-to-end latency measurements.
+
+---
+
+### Conclusion
+
+The Full MIND two-stage recommendation pipeline was implemented successfully.
+
+The experiment verified that:
+
+```text
+1. FAISS inner-product scores accurately reproduce ALS dot products.
+2. Every evaluated user receives 100 unique unseen candidates.
+3. The ALS-only two-stage configuration reproduces direct ALS.
+4. Candidate Recall@100 is 0.010355.
+5. The pipeline evaluates final rankings at K = 10, 20, 40, and 80.
+6. ALS outperforms the static Popularity baseline at every K.
+7. Adding 1% log-popularity slightly reduces ranking quality.
+8. The pipeline runs with sub-millisecond average offline latency per user.
+```
+
+The best current heuristic configuration remains:
+
+```text
+ALS weight:        1.0
+Popularity weight: 0.0
+```
+
+However, the `0.99 + 0.01` experiment is still valuable because it demonstrates that adding a simple static popularity feature does not automatically improve news recommendation.
+
+The next step is to replace manually selected heuristic weights with a learned PyTorch reranker using candidate-level features and impression-level click labels.

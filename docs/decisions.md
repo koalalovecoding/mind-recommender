@@ -135,3 +135,194 @@ In warm-start recommendation, the same user and the same item may appear in both
 **Scope.**
 Sparse matrix construction and ranking evaluation for classical collaborative filtering models.
 
+
+
+## 2026-07-10 Use Streaming Processing for Full MIND
+
+**Decision.**  
+Process Full MIND line by line and save positive interactions as partitioned Parquet files instead of expanding the complete dataset into one pandas DataFrame.
+
+**Reason.**  
+MIND-small was small enough to load and process as complete DataFrames. Full MIND produced more than 77 million train positive-interaction rows, so the same approach could require excessive memory.
+
+The streaming pipeline keeps memory usage bounded by:
+
+```text
+read one behavior row
+→ extract positive interactions
+→ buffer about 500,000 rows
+→ save one Parquet part
+→ clear the buffer
+```
+
+Global `(user_id, item_id)` deduplication is delayed until sparse matrix construction.
+
+News metadata is also kept separate instead of being copied into every interaction row.
+
+**Scope.**  
+Full MIND positive-interaction processing for user/item mappings, sparse matrix construction, and ALS training.
+
+
+
+## 2026-07-10 Build Full MIND Sparse Matrices from Partitioned Data
+
+**Decision.**  
+Build the Full MIND sparse matrices by reading partitioned Parquet files in batches instead of loading the complete interaction table into one pandas DataFrame.
+
+**Difference from MIND-small.**  
+For MIND-small, the complete processed train/dev tables could be loaded into memory, filtered with pandas, deduplicated, and converted directly into CSR matrices.
+
+For Full MIND, the train data contains more than 77 million positive-interaction rows across 155 Parquet files. The files are therefore processed batch by batch, 
+converted into local sparse matrices, and merged while keeping all values binary.
+
+**Unchanged semantics.**
+
+```text
+Train:
+history clicks + clicked train impressions
+
+Dev:
+clicked dev impressions only
+→ remove cold-start users/items
+→ remove train-seen user-item pairs
+```
+
+**Reason.**  
+This preserves the same user-item matrix definition as MIND-small while keeping memory usage manageable on a local machine.
+
+## 2026-07-10 Separate Full MIND ALS Training from Recommendation Generation
+
+**Decision.**  
+Keep the Full MIND ALS training script focused on loading the train matrix, fitting ALS, and saving the trained model and latent factors.
+
+**Difference from MIND-small.**  
+The MIND-small ALS script also loaded ID mappings and news titles, generated a sample user's top-K recommendations, filtered train-seen items, and printed readable recommendation results.
+
+The Full MIND script performs only:
+
+```text
+load train sparse matrix
+→ train implicit ALS
+→ save model
+→ save user factors
+→ save item factors
+```
+
+Sample recommendation generation and evaluation are moved to later scripts.
+
+**Unchanged model setup.**
+
+```text
+factors:        64
+regularization: 0.1
+alpha:          40.0
+iterations:     15
+random_state:   42
+```
+
+The mathematical model and training objective are unchanged. The main difference is dataset scale:
+
+```text
+MIND-small:
+50,000 users
+51,282 items
+1,148,447 positive pairs
+approximately 5 seconds training time
+
+Full MIND:
+711,222 users
+101,527 items
+16,532,504 positive pairs
+88.91 seconds training time
+```
+
+**Reason.**  
+Separating training from recommendation generation keeps the Full MIND script short, makes each stage easier to verify, and avoids mixing model fitting with inference and evaluation logic.
+
+
+
+## 2026-07-10 Use Log-Transformed Popularity in the Heuristic Reranker
+
+**Decision.**
+Use log-transformed item popularity rather than raw popularity when popularity is included as a feature in the MIND-small and Full MIND heuristic rerankers.
+
+The popularity feature is calculated as:
+
+```python
+log_popularity = np.log1p(
+    popularity[candidate_items]
+)
+```
+
+It is then normalized within each user's candidate set:
+
+```python
+normalized_popularity = min_max(
+    log_popularity
+)
+```
+
+The final heuristic reranking score is:
+
+```python
+rerank_score = (
+    als_weight * normalized_als_score
+    + popularity_weight * normalized_popularity
+)
+```
+
+**Reason.**
+Raw item popularity has a highly skewed distribution. A small number of news articles may receive very large click counts, while most articles receive substantially fewer clicks. Directly combining raw popularity with ALS scores could allow a few extremely popular items to dominate the reranking score, even when the popularity weight is relatively small.
+
+The transformation
+
+```text
+log(1 + popularity)
+```
+
+compresses large popularity values while preserving their ordering. It reduces the difference between extremely popular and moderately popular items without removing the popularity signal entirely.
+
+`np.log1p` is used instead of `np.log` because it safely handles items with zero training clicks:
+
+```text
+log1p(0) = 0
+```
+
+**Advantages.**
+
+```text
+1. Reduces the influence of extremely popular outlier items.
+2. Prevents raw click counts from dominating ALS compatibility scores.
+3. Preserves the relative ordering of items by popularity.
+4. Produces a more stable feature before min-max normalization.
+5. Safely handles zero-popularity items.
+6. Makes popularity easier to combine with ALS scores on a comparable scale.
+```
+
+**Scope.**
+The log transformation is used only when popularity is combined with another feature inside the heuristic reranker.
+
+The standalone Popularity baseline still ranks items using raw training click counts. Applying `log1p` would not change that ranking because the logarithm is strictly increasing:
+
+```text
+popularity_i > popularity_j
+if and only if
+log(1 + popularity_i) > log(1 + popularity_j)
+```
+
+Therefore:
+
+```text
+Standalone Popularity baseline:
+raw popularity ranking
+
+Heuristic two-stage reranker:
+log1p(popularity)
+→ candidate-level min-max normalization
+→ weighted combination with normalized ALS score
+```
+
+**Observed result.**
+Although log transformation makes the popularity feature numerically more stable, adding static popularity did not improve the current Full MIND whole-catalog ranking results. The `0.99 ALS + 0.01 popularity` configuration performed slightly below direct ALS at `K = 10, 20, 40, and 80`.
+
+This result suggests that the limitation is not caused by the numerical scale of raw popularity. Static training-period popularity itself provides limited value for predicting future news clicks under temporal drift.
