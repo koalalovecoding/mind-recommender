@@ -2618,3 +2618,451 @@ Popularity weight: 0.0
 However, the `0.99 + 0.01` experiment is still valuable because it demonstrates that adding a simple static popularity feature does not automatically improve news recommendation.
 
 The next step is to replace manually selected heuristic weights with a learned PyTorch reranker using candidate-level features and impression-level click labels.
+
+
+
+## 2026-07-10 Experiment: Full MIND Learned Reranker with Separate FAISS and PyTorch Processes
+
+**Goal.**
+Complete the Full MIND learned-reranking pipeline by training a PyTorch MLP on impression-level positive and negative samples, applying it to FAISS top-100 candidates, and comparing the final ranking quality with Popularity, direct ALS, and the heuristic two-stage model.
+
+A secondary goal was to avoid the macOS OpenMP conflict caused by importing PyTorch and FAISS in the same Python process.
+
+---
+
+### Pipeline architecture
+
+The final Step 18 pipeline was divided into three logical stages:
+
+```text
+Training stage:
+Full MIND train impressions
+→ same-impression positive/negative sampling
+→ five candidate-level features
+→ original-order 90/10 split
+→ feature standardization
+→ PyTorch MLP training
+→ best checkpoint
+
+Step 18a:
+ALS user/item factors
+→ FAISS IndexFlatIP
+→ top-100 unseen candidates
+→ save candidate arrays
+
+Step 18b:
+load top-100 candidate arrays
+→ construct reranking features
+→ load PyTorch checkpoint
+→ learned candidate scoring
+→ final top-K ranking
+→ dev evaluation
+→ four-model comparison
+```
+
+FAISS and PyTorch were intentionally executed in separate processes.
+
+---
+
+### Ranker training data
+
+The official Full MIND train behavior rows were split in original order:
+
+```text
+Total behavior rows:      2,232,748
+Ranker train rows:        2,009,473
+Ranker validation rows:     223,275
+```
+
+For each impression:
+
+```text
+1. All mapped clicked candidates were retained as positive samples.
+2. Up to four exposed-but-not-clicked candidates were sampled per positive.
+3. Negative candidates were sampled from the same impression.
+4. The current impression history was used for user-profile features.
+```
+
+Final candidate-level sample counts:
+
+```text
+Ranker train samples:      14,536,251
+Ranker validation samples:  1,615,970
+```
+
+The samples were stored in memory-safe NumPy parts:
+
+```text
+Train parts:       30
+Validation parts:   4
+Total parts:       34
+Samples per full part: 500,000
+```
+
+---
+
+### Ranking features
+
+The learned reranker used five features:
+
+```text
+1. ALS user-item dot-product score
+2. log1p item popularity
+3. user history length
+4. category affinity
+5. subcategory affinity
+```
+
+Category affinity was defined as:
+
+```text
+number of historical clicks in the candidate category
+-----------------------------------------------------
+mapped user-history length
+```
+
+Subcategory affinity was calculated analogously.
+
+Feature standardization statistics were computed using ranker-training samples only.
+
+### Feature statistics
+
+```text
+Feature                  Mean        Standard deviation
+ALS score                0.335474    0.308629
+log1p popularity         7.630261    1.713575
+history length          40.482110   49.948868
+category affinity        0.167237    0.198416
+subcategory affinity     0.044205    0.088190
+```
+
+---
+
+### PyTorch model
+
+The pointwise reranker used a small MLP:
+
+```text
+Input features: 5
+Hidden layer 1: 32 units + ReLU + dropout
+Hidden layer 2: 16 units + ReLU + dropout
+Output: 1 logit
+```
+
+Training configuration:
+
+```text
+Loss: BCEWithLogitsLoss
+Optimizer: AdamW
+Learning rate: 0.001
+Weight decay: 0.00001
+Dropout: 0.10
+Batch size: 8192
+Maximum epochs: 8
+Negative ratio: 1:4
+Device: Apple MPS
+```
+
+### Training results
+
+```text
+Epoch  Train loss  Validation loss
+1      0.366178    0.342743
+2      0.345559    0.340929
+3      0.344005    0.340335
+4      0.343337    0.339846
+5      0.342891    0.339599
+6      0.342611    0.339413
+7      0.342288    0.339287
+8      0.342100    0.338916
+```
+
+Best checkpoint:
+
+```text
+Best epoch: 8
+Best validation loss: 0.3389157276458985
+Training time: 59.90 seconds
+```
+
+Both training loss and validation loss decreased throughout training, and the epoch-8 checkpoint was retained.
+
+---
+
+## Step 18a: FAISS top-100 candidate retrieval
+
+**Method.**
+Step 18a loaded the saved ALS factors, built an exact inner-product FAISS index, retrieved candidates for every evaluable dev user, filtered train-seen items, and saved exactly 100 unseen candidates per user.
+
+Step 18a imported FAISS but did not import PyTorch.
+
+### Retrieval results
+
+```text
+Evaluated users:             205,536
+Indexed items:               101,527
+Candidates per user:             100
+Candidate Recall@100:       0.010355
+FAISS index build time:     0.020937 seconds
+Candidate retrieval time:  83.889672 seconds
+Retrieval latency:          0.408151 ms/user
+```
+
+Candidate Recall@100 measures the fraction of valid dev positive items contained anywhere in the FAISS top-100 candidate set.
+
+The candidate arrays were saved as `int32`, requiring approximately:
+
+```text
+205,536 × 100 × 4 bytes ≈ 82 MB
+```
+
+### Generated Step 18a files
+
+```text
+data/processed/mindlarge/learned_reranker_eval_users.npy
+data/processed/mindlarge/learned_reranker_faiss_candidates.npy
+data/processed/mindlarge/learned_reranker_sample_user.npy
+data/processed/mindlarge/learned_reranker_sample_candidates.npy
+data/processed/mindlarge/learned_reranker_sample_faiss_scores.npy
+data/processed/mindlarge/learned_reranker_retrieval_summary.json
+```
+
+---
+
+## Step 18b: PyTorch learned reranking and evaluation
+
+**Method.**
+Step 18b loaded the candidates created by Step 18a, constructed the five inference features, standardized them using the statistics stored in the checkpoint, calculated MLP logits, reranked each user's 100 candidates, and evaluated the final ranking against official dev positives.
+
+Step 18b imported PyTorch but did not import FAISS.
+
+Dev labels were used only after:
+
+```text
+candidate retrieval
+→ feature construction
+→ MLP scoring
+→ final candidate sorting
+```
+
+They were not used to train the ranker or construct its input features.
+
+### Learned-reranker results
+
+| Model           |  K |   Recall |     NDCG |      MRR |      MAP | Hit Rate |
+| --------------- | -: | -------: | -------: | -------: | -------: | -------: |
+| TwoStageLearned | 10 | 0.001467 | 0.000775 | 0.000806 | 0.000416 | 0.002851 |
+| TwoStageLearned | 20 | 0.003028 | 0.001252 | 0.001037 | 0.000519 | 0.006320 |
+| TwoStageLearned | 40 | 0.005517 | 0.001879 | 0.001225 | 0.000608 | 0.011789 |
+| TwoStageLearned | 80 | 0.009284 | 0.002686 | 0.001380 | 0.000676 | 0.020610 |
+
+Candidate Recall@100 remained:
+
+```text
+0.010355
+```
+
+for every K because all final rankings used the same FAISS top-100 candidate set.
+
+---
+
+### Four-model comparison
+
+| Model             |  K |   Recall |     NDCG |      MRR |      MAP | Hit Rate |
+| ----------------- | -: | -------: | -------: | -------: | -------: | -------: |
+| Popularity        | 10 | 0.000000 | 0.000000 | 0.000000 | 0.000000 | 0.000000 |
+| ALS               | 10 | 0.001172 | 0.000670 | 0.000800 | 0.000359 | 0.002632 |
+| TwoStageHeuristic | 10 | 0.001158 | 0.000662 | 0.000791 | 0.000354 | 0.002613 |
+| TwoStageLearned   | 10 | 0.001467 | 0.000775 | 0.000806 | 0.000416 | 0.002851 |
+| Popularity        | 20 | 0.000007 | 0.000003 | 0.000002 | 0.000000 | 0.000034 |
+| ALS               | 20 | 0.002250 | 0.001004 | 0.000972 | 0.000430 | 0.005211 |
+| TwoStageHeuristic | 20 | 0.002241 | 0.000998 | 0.000964 | 0.000426 | 0.005196 |
+| TwoStageLearned   | 20 | 0.003028 | 0.001252 | 0.001037 | 0.000519 | 0.006320 |
+| Popularity        | 40 | 0.000779 | 0.000200 | 0.000067 | 0.000028 | 0.001786 |
+| ALS               | 40 | 0.004535 | 0.001578 | 0.001148 | 0.000510 | 0.010319 |
+| TwoStageHeuristic | 40 | 0.004513 | 0.001568 | 0.001138 | 0.000505 | 0.010246 |
+| TwoStageLearned   | 40 | 0.005517 | 0.001879 | 0.001225 | 0.000608 | 0.011789 |
+| Popularity        | 80 | 0.001092 | 0.000262 | 0.000077 | 0.000034 | 0.002394 |
+| ALS               | 80 | 0.008415 | 0.002398 | 0.001299 | 0.000578 | 0.019053 |
+| TwoStageHeuristic | 80 | 0.008390 | 0.002387 | 0.001289 | 0.000574 | 0.018999 |
+| TwoStageLearned   | 80 | 0.009284 | 0.002686 | 0.001380 | 0.000676 | 0.020610 |
+
+---
+
+### Comparison with direct ALS
+
+The learned reranker achieved higher Recall, NDCG, MRR, MAP, and Hit Rate than direct ALS at every evaluated cutoff.
+
+Recall improvements relative to ALS were approximately:
+
+```text
+Recall@10: 25.2%
+Recall@20: 34.6%
+Recall@40: 21.7%
+Recall@80: 10.3%
+```
+
+The largest relative Recall improvement occurred at:
+
+```text
+K = 20
+```
+
+where:
+
+```text
+ALS Recall@20:             0.002250
+Learned Recall@20:         0.003028
+Relative improvement:      approximately 34.6%
+```
+
+The learned reranker also consistently outperformed the heuristic reranker.
+
+---
+
+### Interpretation
+
+The heuristic reranker used:
+
+```text
+0.99 × normalized ALS score
++
+0.01 × normalized log-popularity
+```
+
+It performed slightly below direct ALS at each K.
+
+This indicates that even a small fixed popularity contribution can move some relevant news items downward when static train-period popularity does not align with future dev-period clicks.
+
+The learned reranker performed better because it learned how to combine:
+
+```text
+ALS compatibility
+item popularity
+history length
+category affinity
+subcategory affinity
+```
+
+from impression-level click labels instead of using manually selected weights.
+
+The sample recommendation output also confirmed that the ranker changed the candidate ordering substantially. For example, some items originally retrieved near ranks 70, 85, or 100 were promoted into the final top-10.
+
+---
+
+### Retrieval limitation
+
+The learned reranker can only reorder items already returned by FAISS.
+
+It cannot recover a relevant item outside the top-100 candidate set.
+
+The ratio:
+
+```text
+Recall@80 / Candidate Recall@100
+=
+0.009284 / 0.010355
+≈ 0.897
+```
+
+shows that the learned reranker retained approximately 89.7% of the available candidate recall within its top-80 output.
+
+This suggests that further improvements will increasingly depend on improving the retrieval stage, for example through:
+
+```text
+larger candidate sets
+better ALS tuning
+hybrid retrieval
+content embeddings
+two-tower retrieval
+recency-aware retrieval
+```
+
+---
+
+### Latency
+
+```text
+Feature-part construction:       169.956826 seconds
+Ranker training:                  59.903855 seconds
+FAISS index construction:          0.020937 seconds
+FAISS retrieval:                  83.889672 seconds
+Feature construction + reranking: 34.157593 seconds
+End-to-end retrieval + reranking: 118.047265 seconds
+```
+
+Per-user serving latency:
+
+```text
+FAISS retrieval:          0.408151 ms/user
+Feature + reranking:      0.166188 ms/user
+End-to-end:               0.574339 ms/user
+```
+
+The learned-reranking stage added approximately:
+
+```text
+0.166 ms per user
+```
+
+after candidate retrieval.
+
+The experiment therefore improved ranking quality while maintaining sub-millisecond average offline processing time per user.
+
+---
+
+### Generated Step 18b files
+
+```text
+data/processed/mindlarge/learned_reranker_candidates_sample.csv
+data/processed/mindlarge/learned_reranker_top10.csv
+data/processed/mindlarge/learned_reranker_evaluation.csv
+data/processed/mindlarge/learned_reranker_model_comparison.csv
+data/processed/mindlarge/learned_reranker_latency.json
+```
+
+Existing training artifacts:
+
+```text
+data/processed/mindlarge/learned_reranker_feature_summary.json
+data/processed/mindlarge/learned_reranker_feature_mean.npy
+data/processed/mindlarge/learned_reranker_feature_std.npy
+data/processed/mindlarge/learned_reranker_training_history.csv
+data/processed/mindlarge/learned_reranker_best.pt
+data/processed/mindlarge/learned_reranker_features/train/
+data/processed/mindlarge/learned_reranker_features/validation/
+```
+
+---
+
+### Limitations
+
+The sigmoid-transformed MLP output is a ranking-oriented score between zero and one. It should not be interpreted as a calibrated click-through probability.
+
+The internal 90/10 validation split was used for ranker checkpoint selection. However, the ALS factors and popularity feature were previously constructed using the complete official train split. Therefore, the internal validation loss is useful for training diagnostics and early stopping, but it should not be presented as a completely isolated estimate of final ranking performance.
+
+The official dev evaluation remains the primary model-comparison result because official dev click labels were not used to train the MLP or construct candidate features.
+
+---
+
+### Conclusion
+
+The Full MIND learned-reranker experiment completed successfully.
+
+The final system implements:
+
+```text
+Full MIND impression-level ranker training
+→ memory-safe feature parts
+→ PyTorch MLP
+→ exact FAISS top-100 retrieval
+→ learned candidate reranking
+→ final top-K recommendations
+→ five ranking metrics
+→ four-model comparison
+→ latency measurement
+```
+
+The learned reranker consistently outperformed Popularity, direct ALS, and the heuristic ALS-popularity reranker at K = 10, 20, 40, and 80.
+
+Separating FAISS retrieval and PyTorch reranking into two independent processes resolved the macOS OpenMP conflict without using an unsafe duplicate-runtime workaround.
