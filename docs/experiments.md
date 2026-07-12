@@ -3066,3 +3066,816 @@ Full MIND impression-level ranker training
 The learned reranker consistently outperformed Popularity, direct ALS, and the heuristic ALS-popularity reranker at K = 10, 20, 40, and 80.
 
 Separating FAISS retrieval and PyTorch reranking into two independent processes resolved the macOS OpenMP conflict without using an unsafe duplicate-runtime workaround.
+
+
+## 2026-07-11 Experiment: Six Classical Recommender Comparison on MIND-small
+
+**Goal.**
+Implement and compare six recommendation models under the same warm-start whole-catalog evaluation protocol.
+
+### Models
+
+```text
+Popularity
+ItemKNN
+Truncated SVD
+Implicit ALS
+BPR
+LightFM-Hybrid
+```
+
+LightFM uses item identity, category, and subcategory features. The other models primarily use the train user-item interaction matrix.
+
+### Shared evaluation protocol
+
+All models reuse the same:
+
+```text
+train_interactions.npz
+dev_interactions.npz
+warm-start evaluated users
+train-seen item filtering
+whole-catalog candidate universe
+K = 10, 20, 40, 80
+```
+
+The evaluation includes only users with at least one valid dev positive item.
+
+```text
+Evaluated users: 5,109
+```
+
+Each model generates one top-80 recommendation list per user. The same list is truncated at `K = 10, 20, 40, 80`.
+
+The following ranking metrics are calculated:
+
+```text
+Recall@K
+NDCG@K
+MRR@K
+MAP@K
+Hit Rate@K
+```
+
+Training time, total recommendation time, and recommendation latency per user are also recorded.
+
+For ItemKNN, the `implicit` library may return `-1` when fewer than 80 valid recommendations are available. Invalid entries are removed, and missing positions are filled using popular unseen items so that every model returns exactly 80 unique train-unseen items.
+
+### Results
+
+```text
+       Model  K   Recall     NDCG      MRR      MAP  HitRate
+  Popularity 10 0.000000 0.000000 0.000000 0.000000 0.000000
+     ItemKNN 10 0.001147 0.000810 0.000816 0.000647 0.001566
+TruncatedSVD 10 0.000622 0.000393 0.000407 0.000258 0.001566
+         ALS 10 0.001783 0.000916 0.000778 0.000546 0.003132
+         BPR 10 0.001229 0.000714 0.000936 0.000361 0.002936
+     LightFM 10 0.002001 0.001256 0.001554 0.000755 0.004110
+
+  Popularity 20 0.000000 0.000000 0.000000 0.000000 0.000000
+     ItemKNN 20 0.001172 0.000824 0.000833 0.000649 0.001762
+TruncatedSVD 20 0.001340 0.000580 0.000468 0.000302 0.002545
+         ALS 20 0.003258 0.001343 0.000961 0.000651 0.005676
+         BPR 20 0.002631 0.001101 0.001094 0.000455 0.005089
+     LightFM 20 0.003317 0.001636 0.001718 0.000840 0.006655
+
+  Popularity 40 0.000525 0.000138 0.000051 0.000019 0.001370
+     ItemKNN 40 0.001585 0.000918 0.000858 0.000662 0.002545
+TruncatedSVD 40 0.003054 0.000982 0.000577 0.000357 0.005872
+         ALS 40 0.005296 0.001831 0.001097 0.000718 0.009787
+         BPR 40 0.005192 0.001718 0.001267 0.000544 0.010178
+     LightFM 40 0.005131 0.002047 0.001820 0.000899 0.009787
+
+  Popularity 80 0.001242 0.000271 0.000069 0.000032 0.002349
+     ItemKNN 80 0.002042 0.001012 0.000874 0.000669 0.003523
+TruncatedSVD 80 0.005116 0.001389 0.000644 0.000394 0.009591
+         ALS 80 0.009650 0.002712 0.001243 0.000797 0.018203
+         BPR 80 0.009846 0.002664 0.001431 0.000624 0.019769
+     LightFM 80 0.012248 0.003426 0.002020 0.001024 0.021726
+```
+
+### Runtime
+
+```text
+Model          Training Time   Recommendation Time   Milliseconds/User
+Popularity        0.0044 s           0.1594 s              0.0312
+ItemKNN           0.9025 s           0.4823 s              0.0944
+Truncated SVD     0.7437 s           2.4459 s              0.4787
+ALS               5.5742 s           0.6189 s              0.1211
+BPR              27.0300 s           0.6240 s              0.1221
+LightFM          35.6622 s           2.6352 s              0.5158
+```
+
+### Interpretation
+
+LightFM-Hybrid achieved the strongest overall ranking performance. At `K = 80`, it obtained the highest Recall, NDCG, MRR, MAP, and Hit Rate:
+
+```text
+Recall@80:  0.012248
+NDCG@80:    0.003426
+MRR@80:     0.002020
+MAP@80:     0.001024
+HitRate@80: 0.021726
+```
+
+This indicates that category and subcategory metadata provide useful information beyond collaborative interaction patterns. However, LightFM uses more input information than the pure collaborative-filtering models, so it should be described as a hybrid model rather than a strictly identical-input comparison.
+
+ALS provided the strongest balance between ranking quality and computational efficiency. It substantially outperformed Popularity, ItemKNN, and Truncated SVD while requiring only approximately `5.57` seconds of training and `0.121` milliseconds of recommendation time per user.
+
+BPR achieved slightly higher Recall and Hit Rate than ALS at `K = 80`, but ALS produced higher NDCG and MAP and required much less training time. Under the current baseline hyperparameters, BPR did not consistently outperform ALS.
+
+Truncated SVD was inexpensive to train and outperformed ItemKNN at larger values of K, but its whole-catalog dense scoring made recommendation slower.
+
+ItemKNN was fast but produced weaker ranking results than the latent-factor models. Static Popularity remained the weakest model and produced no hits at `K = 10` or `K = 20`, which is consistent with strong temporal drift in news popularity.
+
+### Generated files
+
+```text
+data/processed/six_model_comparison.csv
+data/processed/six_model_top80_recommendations.npz
+```
+
+`six_model_top80_recommendations.npz` stores the evaluated users and the top-80 recommendations from all six models. These saved recommendation lists will be reused for propensity-weighted and popularity-bias evaluation without retraining the models.
+
+### Conclusion
+
+The experiment successfully implemented and evaluated six classical recommendation models under one consistent protocol.
+
+```text
+Best overall ranking quality: LightFM-Hybrid
+Best quality-efficiency balance: ALS
+Fastest personalized models: ItemKNN and Truncated SVD
+Weakest baseline: static global Popularity
+```
+
+The results show that latent-factor models substantially outperform static Popularity and local item similarity, while hybrid item metadata further improves whole-catalog news recommendation.
+
+
+
+## 2026-07-11 Experiment: Counterfactual-Style Debiased Evaluation and Popularity-Bias Analysis
+
+**Goal.**
+Evaluate the six MIND-small recommendation models using item-level exposure propensity weighting and measure their popularity bias.
+
+### Models
+
+```text
+Popularity
+ItemKNN
+Truncated SVD
+ALS
+BPR
+LightFM-Hybrid
+```
+
+The experiment reuses the top-80 recommendation lists generated in Step 19, so no model is retrained.
+
+### Shared evaluation setup
+
+```text
+Evaluated warm-start users: 5,109
+K values: 10, 20, 40, 80
+Train impression rows: 156,965
+Train-known items: 51,282
+Items exposed at least once: 20,288
+```
+
+The saved recommendations were evaluated against the same dev ground-truth matrix used in the six-model comparison.
+
+The recalculated `NaiveNDCG` values exactly matched the NDCG values from Step 19, confirming that:
+
+```text
+1. The saved recommendation arrays were loaded correctly.
+2. Recommendation rows matched the correct evaluated users.
+3. The same dev ground truth was used.
+4. The same top-K truncation was applied.
+```
+
+### Item-level exposure propensity
+
+The train impression logs were parsed to count how often each item appeared in an impression.
+
+The item-level marginal exposure propensity proxy was defined as:
+
+```text
+raw propensity
+=
+item exposure count
+/
+number of train impressions
+```
+
+Add-one smoothing was applied:
+
+```text
+smoothed propensity
+=
+(exposure count + 1)
+/
+(number of train impressions + 2)
+```
+
+The implementation also applied:
+
+```text
+minimum propensity clipping: 0.0001
+maximum inverse propensity weight: 100
+```
+
+The resulting weights were used to calculate:
+
+```text
+Naive NDCG@K
+IPS NDCG@K
+SNIPS NDCG@K
+Debiased NDCG@K
+```
+
+`DebiasedNDCG` was set equal to the clipped SNIPS result because SNIPS is more stable than unnormalized inverse-propensity weighting.
+
+### Debiased evaluation results
+
+```text
+       Model  K  NaiveNDCG  IPSNDCG  SNIPSNDCG
+  Popularity 10   0.000000 0.000000   0.000000
+     ItemKNN 10   0.000810 0.000741   0.000400
+TruncatedSVD 10   0.000393 0.000281   0.000108
+         ALS 10   0.000916 0.000771   0.000486
+         BPR 10   0.000714 0.000636   0.000690
+     LightFM 10   0.001256 0.000880   0.000594
+
+  Popularity 20   0.000000 0.000000   0.000000
+     ItemKNN 20   0.000824 0.000743   0.000403
+TruncatedSVD 20   0.000580 0.000465   0.000170
+         ALS 20   0.001343 0.001109   0.000663
+         BPR 20   0.001101 0.001001   0.000911
+     LightFM 20   0.001636 0.001201   0.000832
+
+  Popularity 40   0.000138 0.000059   0.000028
+     ItemKNN 40   0.000918 0.000801   0.000442
+TruncatedSVD 40   0.000982 0.000739   0.000336
+         ALS 40   0.001831 0.001472   0.000870
+         BPR 40   0.001718 0.001530   0.001412
+     LightFM 40   0.002047 0.001562   0.001060
+
+  Popularity 80   0.000271 0.000180   0.000038
+     ItemKNN 80   0.001012 0.000896   0.000533
+TruncatedSVD 80   0.001389 0.001056   0.000512
+         ALS 80   0.002712 0.002159   0.001369
+         BPR 80   0.002664 0.002376   0.002243
+     LightFM 80   0.003426 0.002743   0.001850
+```
+
+### Interpretation
+
+LightFM-Hybrid achieved the highest naive NDCG and IPS NDCG.
+
+At `K = 80`:
+
+```text
+LightFM Naive NDCG: 0.003426
+LightFM IPS NDCG:   0.002743
+```
+
+However, BPR achieved the highest SNIPS and debiased NDCG at every evaluated value of K.
+
+At `K = 80`:
+
+```text
+BPR SNIPS NDCG:     0.002243
+LightFM SNIPS NDCG: 0.001850
+ALS SNIPS NDCG:     0.001369
+```
+
+This indicates that LightFM produced the strongest ordinary ranking results, while BPR performed better after giving more weight to relevant items with lower estimated exposure probabilities.
+
+This result is consistent with BPR recommending substantially less popular and more long-tail content.
+
+### Popularity-bias definitions
+
+Item popularity was calculated from the binary train interaction matrix as the number of unique train users who clicked each item.
+
+The popularity head was defined as the smallest set of items accounting for 80% of all train clicks.
+
+```text
+Head items: 4,591
+Long-tail items with at least one train click: 35,274
+```
+
+Long-tail items were defined as:
+
+```text
+items outside the popularity head
+and
+items with at least one train click
+```
+
+Items with zero train clicks were not counted as long-tail items.
+
+The following metrics were calculated:
+
+```text
+Average Recommendation Popularity
+Average Log Recommendation Popularity
+Long-Tail Recommendation Share
+Catalog Coverage
+```
+
+### Popularity-bias results at K = 80
+
+```text
+Model          Avg. Popularity  Long-Tail Share  Catalog Coverage
+Popularity          1856.05          0.000000          0.002594
+ItemKNN             1103.05          0.354130          0.494072
+Truncated SVD        929.73          0.000188          0.024863
+ALS                  814.04          0.001757          0.074490
+BPR                  195.26          0.247659          0.198900
+LightFM              978.02          0.025073          0.141609
+```
+
+### Popularity-bias interpretation
+
+Popularity produced the most concentrated recommendation lists:
+
+```text
+Long-tail share at K=80: 0.000000
+Catalog coverage at K=80: 0.002594
+```
+
+ItemKNN achieved the highest catalog coverage and long-tail recommendation share:
+
+```text
+Long-tail share at K=80: 35.41%
+Catalog coverage at K=80: 49.41%
+```
+
+However, ItemKNN had substantially lower ranking quality than ALS, BPR, and LightFM.
+
+BPR provided the strongest balance between relevance and reduced popularity bias:
+
+```text
+Average recommendation popularity at K=80: 195.26
+Long-tail share at K=80: 24.77%
+Catalog coverage at K=80: 19.89%
+SNIPS NDCG at K=80: 0.002243
+```
+
+LightFM achieved the best naive ranking quality but remained substantially more concentrated on popular items than BPR.
+
+ALS also remained strongly head-focused, with only `0.18%` of its top-80 recommendations coming from the defined long tail.
+
+### Problems and limitations
+
+#### 1. The propensity is only an item-level proxy
+
+The experiment estimates:
+
+```text
+P(item i is exposed in a random impression)
+```
+
+It does not estimate the full user-item propensity:
+
+```text
+P(E_ui = 1 | user u, item i)
+```
+
+MIND does not provide the true historical logging probabilities or randomized exposure data.
+
+Therefore, this experiment should be described as:
+
+```text
+counterfactual-style evaluation
+propensity-weighted evaluation
+exposure-adjusted evaluation
+```
+
+It should not be described as a fully unbiased causal evaluation.
+
+#### 2. Inverse weights were heavily clipped
+
+```text
+Items at maximum inverse-weight clip: 50,249
+Total train-known items:              51,282
+```
+
+Approximately 98% of the items received the maximum inverse weight of `100`.
+
+This happened because most individual news items had a marginal exposure probability below `0.01`.
+
+Clipping controls the high variance of IPS, but such heavy clipping also removes much of the difference between low-propensity items.
+
+Therefore, the absolute IPS and SNIPS values should be interpreted cautiously.
+
+A future sensitivity analysis should compare multiple clipping thresholds, such as:
+
+```text
+100
+500
+1000
+```
+
+#### 3. MIND does not provide randomized exposure
+
+The observed impression logs were generated by an unknown historical recommendation policy.
+
+The exposure estimates may therefore reflect the historical system's selection bias rather than true exposure probabilities.
+
+#### 4. Popularity bias and ranking accuracy measure different objectives
+
+High catalog coverage or long-tail share does not necessarily imply better recommendation quality.
+
+For example, ItemKNN produced the highest coverage but weaker Recall and NDCG.
+
+The final comparison should therefore consider both:
+
+```text
+ranking relevance
+and
+recommendation concentration / popularity bias
+```
+
+### Generated files
+
+```text
+data/processed/item_propensity.csv
+data/processed/item_propensity.npy
+data/processed/item_inverse_propensity.npy
+data/processed/debiased_evaluation_comparison.csv
+data/processed/popularity_bias_comparison.csv
+```
+
+### Conclusion
+
+The experiment completed the counterfactual-style evaluation and popularity-bias analysis for all six MIND-small recommenders.
+
+The main results are:
+
+```text
+Best naive ranking quality: LightFM-Hybrid
+Best IPS NDCG: LightFM-Hybrid
+Best SNIPS / debiased NDCG: BPR
+Lowest recommendation popularity: BPR
+Highest long-tail share: ItemKNN
+Highest catalog coverage: ItemKNN
+Most concentrated model: Popularity
+```
+
+The results demonstrate that the model with the strongest ordinary ranking accuracy is not necessarily the model with the lowest popularity bias. LightFM achieved the best naive ranking results, while BPR provided a better balance between ranking quality, lower item popularity, long-tail exposure, and catalog coverage.
+
+
+## 2026-07-11 Experiment: Robustness Analysis for Debiased Evaluation
+
+**Goal.**
+Extend the previous counterfactual-style evaluation with robustness checks for propensity clipping, support violations, popularity bias, and statistical uncertainty.
+
+This experiment does not replace the previous Step 20 entry. It records the improved evaluation and analyzes how the conclusions changed after adding sensitivity analysis and bootstrap confidence intervals.
+
+### Improvements
+
+The revised evaluation added:
+
+```text
+Inverse-weight clipping sensitivity: 100, 500, 1000
+All-item and supported-relevant-only evaluation scopes
+Zero-exposure support diagnostics
+Active catalog coverage
+Zero-popularity recommendation share
+User-level bootstrap confidence intervals
+Paired bootstrap model comparisons
+```
+
+The six models were not retrained. The experiment reused the saved top-80 recommendation lists from Step 19.
+
+### Propensity and support diagnostics
+
+```text
+Evaluated users: 5,109
+Train impression rows: 156,965
+Train-known items: 51,282
+Items exposed at least once: 20,288
+Items with zero observed exposure: 30,994
+```
+
+Inverse-weight clipping remained severe:
+
+```text
+Maximum weight 100:  50,249 items clipped, 97.99%
+Maximum weight 500:  48,814 items clipped, 95.19%
+Maximum weight 1000: 48,249 items clipped, 94.09%
+```
+
+Increasing the clipping threshold reduced saturation only slightly. Even at a maximum weight of `1000`, more than 94% of the catalog reached the clipping limit.
+
+This shows that most item-level marginal exposure probabilities are extremely small. The propensity-weighted metrics therefore mainly distinguish highly exposed items from the large set of low-exposure items, rather than precisely distinguishing different low-exposure items.
+
+The support diagnostics found:
+
+```text
+Zero-exposure dev positive pairs: 209
+Zero-exposure unique dev positive items: 2
+```
+
+Only two unique dev items lacked observed train exposure, although they appeared in 209 positive user-item pairs. The support problem is therefore concentrated in a very small number of items rather than spread broadly across the dev catalog.
+
+### Primary evaluation configuration
+
+The main result table used:
+
+```text
+Maximum inverse propensity weight: 500
+Evaluation scope: AllItems
+K values: 10, 20, 40, 80
+```
+
+The reported weighted metric is named `SNIPSStyleNDCG` because it is calculated as the ratio of aggregate propensity-weighted DCG to aggregate propensity-weighted ideal DCG. It is not a strict policy-value SNIPS estimator.
+
+### Primary results at K = 80
+
+```text
+Model          Naive NDCG   IPS NDCG   SNIPS-style NDCG
+Popularity       0.000271    0.000164          0.000009
+ItemKNN          0.001012    0.000833          0.000314
+Truncated SVD    0.001389    0.000925          0.000140
+ALS              0.002712    0.001796          0.000386
+BPR              0.002664    0.001904          0.000975
+LightFM          0.003426    0.002260          0.000607
+```
+
+### Difference from the previous evaluation
+
+The previous experiment used a maximum inverse weight of `100`.
+
+Under that configuration, the SNIPS-style NDCG values at `K = 80` were approximately:
+
+```text
+BPR:     0.002243
+LightFM: 0.001850
+ALS:     0.001369
+```
+
+After increasing the main clipping threshold to `500`, the values became:
+
+```text
+BPR:     0.000975
+LightFM: 0.000607
+ALS:     0.000386
+```
+
+The absolute values decreased substantially because the larger clipping threshold increased the ideal weighted gain for low-propensity relevant items. However, the relative ordering remained:
+
+```text
+BPR > LightFM > ALS
+```
+
+This is more important than the absolute metric scale. The result suggests that the conclusion favoring BPR under exposure-weighted evaluation is not caused only by the original clipping threshold of `100`.
+
+The naive NDCG values did not change because ordinary NDCG does not use propensity weights.
+
+### Bootstrap confidence intervals
+
+User-level bootstrap sampling was performed with:
+
+```text
+Bootstrap samples: 1,000
+Evaluation K: 80
+Random seed: 42
+Maximum inverse weight: 500
+```
+
+#### Naive NDCG confidence intervals
+
+```text
+Model          Estimate    95% confidence interval
+Popularity     0.000271    [0.000113, 0.000453]
+ItemKNN        0.001008    [0.000438, 0.001764]
+Truncated SVD  0.001394    [0.000921, 0.001960]
+ALS            0.002709    [0.002006, 0.003501]
+BPR            0.002666    [0.002073, 0.003361]
+LightFM        0.003429    [0.002676, 0.004201]
+```
+
+LightFM had the highest naive NDCG point estimate. However, the paired differences between LightFM, ALS, and BPR were not statistically clear at the 95% bootstrap level.
+
+```text
+LightFM - ALS:
+mean difference = 0.000720
+95% CI = [-0.000178, 0.001543]
+
+LightFM - BPR:
+mean difference = 0.000763
+95% CI = [-0.000175, 0.001683]
+
+BPR - ALS:
+mean difference = -0.000043
+95% CI = [-0.000931, 0.000762]
+```
+
+All three confidence intervals included zero.
+
+Therefore, the correct conclusion is:
+
+```text
+LightFM achieved the highest naive NDCG point estimate,
+but its advantage over ALS and BPR was not statistically
+established by the paired bootstrap analysis.
+```
+
+#### SNIPS-style NDCG confidence intervals
+
+```text
+Model          Estimate    95% confidence interval
+Popularity     0.000009    [0.000004, 0.000014]
+ItemKNN        0.000315    [0.000087, 0.000699]
+Truncated SVD  0.000139    [0.000086, 0.000208]
+ALS            0.000386    [0.000252, 0.000538]
+BPR            0.000972    [0.000711, 0.001256]
+LightFM        0.000614    [0.000424, 0.000861]
+```
+
+The paired bootstrap comparisons were:
+
+```text
+LightFM - ALS:
+mean difference = 0.000228
+95% CI = [0.000023, 0.000472]
+
+LightFM - BPR:
+mean difference = -0.000358
+95% CI = [-0.000654, -0.000072]
+
+BPR - ALS:
+mean difference = 0.000586
+95% CI = [0.000305, 0.000897]
+```
+
+None of these confidence intervals included zero.
+
+Under the current item-level propensity proxy and clipping configuration, the statistically supported ordering was:
+
+```text
+BPR > LightFM > ALS
+```
+
+This is stronger evidence than the previous experiment, which compared only point estimates.
+
+### Popularity-bias results at K = 80
+
+```text
+Model          Avg. Popularity  Long-Tail Share  Catalog Coverage  Active Coverage
+Popularity          1856.05          0.000000          0.002594         0.003336
+ItemKNN             1103.05          0.354130          0.494072         0.635570
+Truncated SVD        929.73          0.000188          0.024863         0.031983
+ALS                  814.04          0.001757          0.074490         0.095823
+BPR                  195.26          0.247659          0.198900         0.255864
+LightFM              978.02          0.025073          0.141609         0.182165
+```
+
+All models had:
+
+```text
+ZeroPopularityRecommendationShare = 0
+```
+
+Therefore, none of the models recommended items with zero train clicks. The reported long-tail recommendations came from items with observed train interactions rather than completely unseen items.
+
+### Model interpretation
+
+#### LightFM
+
+LightFM achieved the highest naive NDCG and IPS NDCG point estimates.
+
+However, its paired bootstrap confidence intervals did not establish a clear naive NDCG advantage over ALS or BPR.
+
+LightFM also recommended substantially more popular content than BPR:
+
+```text
+Average popularity at K=80:
+LightFM: 978.02
+BPR:     195.26
+```
+
+Its long-tail share was only `2.51%`, compared with `24.77%` for BPR.
+
+#### BPR
+
+BPR achieved the highest SNIPS-style NDCG and the difference was supported by paired bootstrap confidence intervals.
+
+It also had:
+
+```text
+Low average recommendation popularity
+High long-tail recommendation share
+Moderate catalog coverage
+Competitive naive ranking quality
+```
+
+BPR provided the strongest balance between ordinary relevance and reduced popularity concentration.
+
+#### ALS
+
+ALS remained computationally efficient and achieved competitive naive NDCG.
+
+However, it strongly favored popularity-head items:
+
+```text
+Long-tail share at K=80: 0.18%
+Active catalog coverage: 9.58%
+```
+
+ALS remained a strong efficiency baseline, but not the strongest model for long-tail or exposure-adjusted recommendation.
+
+#### ItemKNN
+
+ItemKNN achieved the highest catalog exploration:
+
+```text
+Long-tail share at K=80: 35.41%
+Active catalog coverage: 63.56%
+```
+
+However, its ranking accuracy was substantially below ALS, BPR, and LightFM.
+
+High catalog coverage therefore did not imply high recommendation relevance.
+
+#### Popularity
+
+Popularity remained the weakest model for both ranking accuracy and catalog diversity.
+
+It recommended a very small subset of highly popular items and produced almost no useful ranking signal under either naive or propensity-weighted evaluation.
+
+### Main conclusions
+
+The improved evaluation changed the interpretation from a simple model ranking to a multi-objective comparison.
+
+```text
+Highest naive NDCG point estimate:
+LightFM
+
+Statistically clear naive winner among LightFM, ALS, and BPR:
+None
+
+Highest SNIPS-style weighted NDCG:
+BPR
+
+Best accuracy–popularity-bias balance:
+BPR
+
+Best quality–efficiency balance:
+ALS
+
+Highest long-tail share and catalog coverage:
+ItemKNN
+
+Most concentrated model:
+Popularity
+```
+
+The main conclusion is that model rankings depend on the evaluation objective.
+
+LightFM produced the strongest ordinary ranking point estimate. BPR performed better when low-exposure relevant items received greater importance and also showed substantially lower popularity bias. ALS remained the most practical efficiency-oriented collaborative-filtering baseline.
+
+### Limitations
+
+The following limitations remain:
+
+```text
+The propensity is an item-level marginal exposure proxy.
+The true user-item logging propensity is unknown.
+The exposure data were not generated by a randomized policy.
+More than 94% of items remained clipped even at weight 1000.
+SNIPSStyleNDCG is not a strict policy-value SNIPS estimator.
+Only 5,109 warm-start users were evaluated.
+```
+
+Because of these limitations, the propensity-weighted results should be interpreted as:
+
+```text
+robustness analysis
+exposure-adjusted evaluation
+popularity-bias diagnostic
+counterfactual-style evaluation
+```
+
+They should not be described as a fully unbiased causal estimate of recommendation policy value.
+
+### Generated files
+
+```text
+data/processed/item_propensity.csv
+data/processed/item_propensity.npy
+data/processed/item_inverse_propensity.npy
+data/processed/debiased_evaluation_comparison.csv
+data/processed/debiased_evaluation_sensitivity.csv
+data/processed/popularity_bias_comparison.csv
+data/processed/recommendation_support_diagnostics.csv
+data/processed/propensity_support_summary.json
+data/processed/bootstrap_confidence_intervals.csv
+data/processed/bootstrap_pairwise_differences.csv
+```
+
+### Final status
+
+The debiased evaluation is now considered complete.
+
+No additional recommendation models or counterfactual estimators are required for the current project. Future work may explore better propensity models or randomized exposure data, but the current implementation is sufficient for project documentation and interview discussion.

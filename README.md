@@ -51,7 +51,6 @@ The project treats recommendation not simply as click prediction, but as learnin
   * [Full MIND Popularity and ALS Recommendations](#full-mind-popularity-and-als-recommendations)
   * [Full MIND Popularity and ALS Evaluation](#full-mind-popularity-and-als-evaluation)
   * [Full MIND FAISS Two-Stage Pipeline](#full-mind-faiss-two-stage-pipeline)
-  * [Full MIND Learned PyTorch Reranker](#full-mind-learned-pytorch-reranker)
   * [MIND-small versus Full MIND](#mind-small-versus-full-mind)
 * [Generated Files](#generated-files)
 * [Repository Structure](#repository-structure)
@@ -107,9 +106,7 @@ Full MIND behavior logs
 → whole-catalog ranking evaluation
 → FAISS top-100 candidate retrieval
 → heuristic reranking
-→ supervised PyTorch MLP reranking
 → final top-K recommendations
-→ four-model comparison
 ```
 
 ---
@@ -150,14 +147,8 @@ The current version has completed:
 * Full MIND heuristic ALS-plus-popularity reranking
 * Full MIND Popularity versus ALS versus TwoStage comparison
 * Full MIND candidate-retrieval and reranking latency measurement
-* Full MIND impression-level clicked and exposed-non-clicked ranker samples
-* Memory-safe NumPy feature parts for learned-ranker training
-* Supervised PyTorch MLP learned reranker
-* Separate Step 18a FAISS retrieval and Step 18b PyTorch reranking processes
-* Full MIND four-model comparison: Popularity, ALS, heuristic two-stage, and learned two-stage
-* Full MIND learned-reranker retrieval, reranking, and end-to-end latency measurement
 
-The project now contains reproducible MIND-small and Full MIND pipelines under a warm-start whole-catalog evaluation protocol.
+The current pipeline uses MIND-small and produces reproducible baseline results under a warm-start whole-catalog evaluation protocol.
 
 The MIND-small two-stage pipeline uses:
 
@@ -170,7 +161,7 @@ ALS user/item factors
 → final top-10 recommendations
 ```
 
-For Full MIND, Steps 11–18 now complete the pipeline from memory-safe behavior processing through recommendation generation, baseline evaluation, exact FAISS retrieval, heuristic reranking, supervised PyTorch reranking, four-model comparison, and latency measurement. Step 18 was executed as separate FAISS retrieval and PyTorch reranking processes to avoid a macOS OpenMP runtime conflict. The next planned step is a controlled MIND-small versus Full MIND comparison.
+For Full MIND, Steps 11–17 now complete the pipeline from memory-safe behavior processing through recommendation generation, baseline evaluation, exact FAISS retrieval, heuristic reranking, and latency measurement. The next modeling step is a learned reranker trained from impression-level clicked and exposed-but-not-clicked candidates, followed by a controlled MIND-small versus Full MIND comparison.
 
 ---
 
@@ -1603,277 +1594,6 @@ data/processed/mindlarge/two_stage_model_comparison.csv
 data/processed/mindlarge/two_stage_latency.json
 ```
 
-### Full MIND Learned PyTorch Reranker
-
-Step 18 replaces the manually weighted heuristic ranker with a supervised neural-network reranker while keeping the ALS–FAISS retrieval stage fixed.
-
-The model-level pipeline is:
-
-```text
-Stage 1: candidate retrieval
-ALS user/item factors
-→ exact FAISS inner-product search
-→ filter train-seen items
-→ retain top-100 unseen candidates
-
-Stage 2: learned ranking
-candidate-level features
-→ standardized PyTorch MLP
-→ one learned logit per candidate
-→ sort candidates by logit
-→ final top-K recommendations
-```
-
-This controlled design isolates the value of the ranking model. Step 17 and Step 18 use the same ALS-based top-100 candidate set; Step 17 applies a fixed ALS-plus-popularity formula, while Step 18 learns the ranking function from impression-level click labels.
-
-#### Ranker training data
-
-The official Full MIND train behavior rows were processed in original order:
-
-```text
-Total behavior rows:       2,232,748
-Ranker train rows:         2,009,473
-Ranker validation rows:      223,275
-Train candidate samples:  14,536,251
-Validation samples:        1,615,970
-```
-
-For each train impression:
-
-```text
-clicked candidate               → positive label 1
-exposed but not clicked item    → weak negative label 0
-```
-
-All mapped positives were retained. For every positive, at most four exposed non-clicked items from the same impression were sampled as negatives.
-
-Same-impression negatives are more informative than arbitrary catalog negatives because they were actually exposed in the same recommendation context. They are still interpreted as weak negatives rather than explicit dislikes.
-
-To keep memory usage bounded, the candidate-level features were written into NumPy part files instead of storing all samples in memory:
-
-```text
-30 train parts
-4 validation parts
-500,000 samples per full part
-```
-
-#### Ranking features and MLP architecture
-
-The learned ranker uses five numerical features:
-
-```text
-1. ALS user-item dot-product score
-2. log(1 + item popularity)
-3. user history length
-4. category affinity
-5. subcategory affinity
-```
-
-Category affinity is the fraction of the user's mapped history belonging to the candidate's category. Subcategory affinity is defined analogously.
-
-The PyTorch model is a small multilayer perceptron:
-
-```text
-5 input features
-→ Linear(5, 32)
-→ ReLU
-→ Dropout(0.10)
-→ Linear(32, 16)
-→ ReLU
-→ Dropout(0.10)
-→ Linear(16, 1)
-→ output logit
-```
-
-This is a supervised pointwise learning-to-rank model. Each user-candidate pair is trained as a binary example, and candidates are sorted by the final logits.
-
-Training configuration:
-
-```text
-Loss:             BCEWithLogitsLoss
-Optimizer:        AdamW
-Learning rate:    0.001
-Weight decay:     0.00001
-Batch size:       8,192
-Maximum epochs:   8
-Device:           Apple MPS
-```
-
-Feature means and standard deviations were calculated from ranker-training samples only and saved with the best checkpoint.
-
-Training results:
-
-| Epoch | Train Loss | Validation Loss |
-| ---: | ---: | ---: |
-| 1 | 0.366178 | 0.342743 |
-| 2 | 0.345559 | 0.340929 |
-| 3 | 0.344005 | 0.340335 |
-| 4 | 0.343337 | 0.339846 |
-| 5 | 0.342891 | 0.339599 |
-| 6 | 0.342611 | 0.339413 |
-| 7 | 0.342288 | 0.339287 |
-| 8 | 0.342100 | 0.338916 |
-
-The best checkpoint was:
-
-```text
-Best epoch:             8
-Best validation loss:   0.3389157276458985
-Ranker training time:   59.90 seconds
-```
-
-#### Step 18a: separate FAISS candidate retrieval
-
-`notebooks/18a_mind_large_faiss_candidates.py` performs candidate generation without importing PyTorch.
-
-It:
-
-```text
-1. loads the ALS factors and train/dev matrices;
-2. builds an exact FAISS IndexFlatIP over 101,527 item factors;
-3. retrieves extra raw results before filtering;
-4. removes train-seen items;
-5. stores exactly 100 unique unseen candidates per evaluated user;
-6. calculates Candidate Recall@100;
-7. saves the candidate matrix for Step 18b.
-```
-
-Results:
-
-```text
-Evaluated users:             205,536
-Indexed items:               101,527
-Candidates per user:             100
-Candidate Recall@100:       0.010355
-FAISS index build time:     0.0209 seconds
-Candidate retrieval time:  83.8897 seconds
-Retrieval latency:          0.4082 ms/user
-```
-
-The candidate matrix is saved as `int32` and occupies approximately 82 MB:
-
-```text
-205,536 users × 100 candidates × 4 bytes
-```
-
-#### Step 18b: separate PyTorch learned reranking
-
-`notebooks/18b_mind_large_learned_reranker_evaluation.py` loads the saved candidates and the best MLP checkpoint without importing FAISS.
-
-It constructs the same five features for each candidate, applies training-derived standardization, calculates learned logits, reranks the 100 candidates, produces readable sample recommendations, and evaluates the final ranking.
-
-The sigmoid-transformed value saved in the sample output is a ranking-oriented score. It is not presented as a calibrated click-through probability.
-
-Learned-reranker results:
-
-| Model | K | Recall | NDCG | MRR | MAP | Hit Rate | Candidate Recall@100 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| TwoStageLearned | 10 | 0.001467 | 0.000775 | 0.000806 | 0.000416 | 0.002851 | 0.010355 |
-| TwoStageLearned | 20 | 0.003028 | 0.001252 | 0.001037 | 0.000519 | 0.006320 | 0.010355 |
-| TwoStageLearned | 40 | 0.005517 | 0.001879 | 0.001225 | 0.000608 | 0.011789 | 0.010355 |
-| TwoStageLearned | 80 | 0.009284 | 0.002686 | 0.001380 | 0.000676 | 0.020610 | 0.010355 |
-
-#### Four-model comparison
-
-| Model | K | Recall | NDCG | MRR | MAP | Hit Rate |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Popularity | 10 | 0.000000 | 0.000000 | 0.000000 | 0.000000 | 0.000000 |
-| ALS | 10 | 0.001172 | 0.000670 | 0.000800 | 0.000359 | 0.002632 |
-| TwoStageHeuristic | 10 | 0.001158 | 0.000662 | 0.000791 | 0.000354 | 0.002613 |
-| TwoStageLearned | 10 | 0.001467 | 0.000775 | 0.000806 | 0.000416 | 0.002851 |
-| Popularity | 20 | 0.000007 | 0.000003 | 0.000002 | 0.000000 | 0.000034 |
-| ALS | 20 | 0.002250 | 0.001004 | 0.000972 | 0.000430 | 0.005211 |
-| TwoStageHeuristic | 20 | 0.002241 | 0.000998 | 0.000964 | 0.000426 | 0.005196 |
-| TwoStageLearned | 20 | 0.003028 | 0.001252 | 0.001037 | 0.000519 | 0.006320 |
-| Popularity | 40 | 0.000779 | 0.000200 | 0.000067 | 0.000028 | 0.001786 |
-| ALS | 40 | 0.004535 | 0.001578 | 0.001148 | 0.000510 | 0.010319 |
-| TwoStageHeuristic | 40 | 0.004513 | 0.001568 | 0.001138 | 0.000505 | 0.010246 |
-| TwoStageLearned | 40 | 0.005517 | 0.001879 | 0.001225 | 0.000608 | 0.011789 |
-| Popularity | 80 | 0.001092 | 0.000262 | 0.000077 | 0.000034 | 0.002394 |
-| ALS | 80 | 0.008415 | 0.002398 | 0.001299 | 0.000578 | 0.019053 |
-| TwoStageHeuristic | 80 | 0.008390 | 0.002387 | 0.001289 | 0.000574 | 0.018999 |
-| TwoStageLearned | 80 | 0.009284 | 0.002686 | 0.001380 | 0.000676 | 0.020610 |
-
-The learned ranker outperformed Popularity, direct ALS, and the heuristic reranker on all five metrics at every evaluated cutoff.
-
-Recall improvement relative to direct ALS was approximately:
-
-```text
-Recall@10: 25.2%
-Recall@20: 34.6%
-Recall@40: 21.7%
-Recall@80: 10.3%
-```
-
-The largest relative Recall improvement occurred at $K=20$.
-
-Because Step 17 and Step 18 use the same FAISS top-100 candidates, their Candidate Recall@100 values are identical. Candidate Recall measures retrieval coverage; the final metrics measure how well each ranker orders the retrieved candidates.
-
-#### Learned-reranker latency
-
-```text
-Feature-part construction:        169.9568 seconds
-Ranker training:                   59.9039 seconds
-FAISS index construction:           0.0209 seconds
-FAISS retrieval:                   83.8897 seconds
-Feature construction + reranking:  34.1576 seconds
-End-to-end retrieval + reranking: 118.0473 seconds
-```
-
-Per-user averages:
-
-```text
-FAISS retrieval:              0.4082 ms/user
-Feature construction/rerank:  0.1662 ms/user
-End-to-end:                   0.5743 ms/user
-```
-
-These are offline batch averages rather than online p95 or p99 serving measurements.
-
-#### Why Step 18 was split into 18a and 18b
-
-The original single-process implementation successfully generated the memory-safe feature parts and trained the MLP, but macOS aborted when PyTorch/MPS and FAISS initialized conflicting OpenMP runtimes in the same Python process.
-
-The final implementation uses process-level separation:
-
-```text
-18a process:
-FAISS only
-→ save users and candidates
-
-18b process:
-PyTorch only
-→ load candidates
-→ learned reranking and evaluation
-```
-
-This change does not alter the recommendation algorithm. It only decouples candidate generation and ranking at the execution level. The saved candidate arrays also make it possible to reuse exactly the same retrieval set for future ranking experiments.
-
-Generated training and evaluation files:
-
-```text
-data/processed/mindlarge/learned_reranker_features/train/features-*.npy
-data/processed/mindlarge/learned_reranker_features/train/labels-*.npy
-data/processed/mindlarge/learned_reranker_features/validation/features-*.npy
-data/processed/mindlarge/learned_reranker_features/validation/labels-*.npy
-data/processed/mindlarge/learned_reranker_feature_summary.json
-data/processed/mindlarge/learned_reranker_feature_mean.npy
-data/processed/mindlarge/learned_reranker_feature_std.npy
-data/processed/mindlarge/learned_reranker_training_history.csv
-data/processed/mindlarge/learned_reranker_best.pt
-data/processed/mindlarge/learned_reranker_eval_users.npy
-data/processed/mindlarge/learned_reranker_faiss_candidates.npy
-data/processed/mindlarge/learned_reranker_sample_user.npy
-data/processed/mindlarge/learned_reranker_sample_candidates.npy
-data/processed/mindlarge/learned_reranker_sample_faiss_scores.npy
-data/processed/mindlarge/learned_reranker_retrieval_summary.json
-data/processed/mindlarge/learned_reranker_candidates_sample.csv
-data/processed/mindlarge/learned_reranker_top10.csv
-data/processed/mindlarge/learned_reranker_evaluation.csv
-data/processed/mindlarge/learned_reranker_model_comparison.csv
-data/processed/mindlarge/learned_reranker_latency.json
-```
-
 ### MIND-small versus Full MIND
 
 | Statistic | MIND-small | Full MIND |
@@ -1999,31 +1719,6 @@ Full MIND ranking metrics have now been computed with the same warm-start whole-
 ../data/processed/mindlarge/two_stage_latency.json
 ```
 
-### Full MIND learned-reranker files
-
-```text
-../data/processed/mindlarge/learned_reranker_features/train/features-*.npy
-../data/processed/mindlarge/learned_reranker_features/train/labels-*.npy
-../data/processed/mindlarge/learned_reranker_features/validation/features-*.npy
-../data/processed/mindlarge/learned_reranker_features/validation/labels-*.npy
-../data/processed/mindlarge/learned_reranker_feature_summary.json
-../data/processed/mindlarge/learned_reranker_feature_mean.npy
-../data/processed/mindlarge/learned_reranker_feature_std.npy
-../data/processed/mindlarge/learned_reranker_training_history.csv
-../data/processed/mindlarge/learned_reranker_best.pt
-../data/processed/mindlarge/learned_reranker_eval_users.npy
-../data/processed/mindlarge/learned_reranker_faiss_candidates.npy
-../data/processed/mindlarge/learned_reranker_sample_user.npy
-../data/processed/mindlarge/learned_reranker_sample_candidates.npy
-../data/processed/mindlarge/learned_reranker_sample_faiss_scores.npy
-../data/processed/mindlarge/learned_reranker_retrieval_summary.json
-../data/processed/mindlarge/learned_reranker_candidates_sample.csv
-../data/processed/mindlarge/learned_reranker_top10.csv
-../data/processed/mindlarge/learned_reranker_evaluation.csv
-../data/processed/mindlarge/learned_reranker_model_comparison.csv
-../data/processed/mindlarge/learned_reranker_latency.json
-```
-
 ---
 
 ## Repository Structure
@@ -2063,10 +1758,7 @@ recsys-news-debiasing/
 │   ├── 14_train_mind_large_als.py
 │   ├── 15_mind_large_recommendations.py
 │   ├── 16_mind_large_ranking_evaluation.py
-│   ├── 17_mind_large_two_stage_pipeline.py
-│   ├── 18_mind_large_learned_reranker.py
-│   ├── 18a_mind_large_faiss_candidates.py
-│   └── 18b_mind_large_learned_reranker_evaluation.py
+│   └── 17_mind_large_two_stage_pipeline.py
 └── src/
     ├── data/
     ├── models/
@@ -2101,9 +1793,6 @@ recsys-news-debiasing/
 * `notebooks/15_mind_large_recommendations.py`: Full MIND Popularity calculation and readable Popularity/ALS sample recommendations
 * `notebooks/16_mind_large_ranking_evaluation.py`: Full MIND warm-start whole-catalog evaluation for Popularity and ALS
 * `notebooks/17_mind_large_two_stage_pipeline.py`: Full MIND exact FAISS retrieval, top-100 candidate construction, heuristic reranking, three-model comparison, and latency evaluation
-* `notebooks/18_mind_large_learned_reranker.py`: memory-safe impression-sample feature generation, feature standardization, PyTorch MLP training, validation, and best-checkpoint persistence
-* `notebooks/18a_mind_large_faiss_candidates.py`: FAISS-only top-100 candidate generation and Candidate Recall@100 evaluation for the learned-ranker pipeline
-* `notebooks/18b_mind_large_learned_reranker_evaluation.py`: PyTorch-only learned reranking, sample output, four-model comparison, and combined latency reporting
 
 ---
 
@@ -2216,13 +1905,6 @@ python -u notebooks/14_train_mind_large_als.py
 python -u notebooks/15_mind_large_recommendations.py
 python -u notebooks/16_mind_large_ranking_evaluation.py
 python -u notebooks/17_mind_large_two_stage_pipeline.py
-
-# Step 18 training creates/reuses feature parts and saves the best MLP checkpoint.
-python -u notebooks/18_mind_large_learned_reranker.py
-
-# Run retrieval and learned evaluation in separate processes on macOS.
-python -u notebooks/18a_mind_large_faiss_candidates.py
-python -u notebooks/18b_mind_large_learned_reranker_evaluation.py
 ```
 
 These steps perform:
@@ -2235,19 +1917,6 @@ These steps perform:
 15: calculate Full MIND Popularity and generate sample Popularity/ALS recommendations
 16: evaluate Popularity and ALS at K = 10, 20, 40, and 80
 17: build the exact FAISS top-100 retrieval and heuristic reranking pipeline
-18: build impression-level features and train the pointwise PyTorch MLP ranker
-18a: generate and persist the shared FAISS top-100 candidate set
-18b: load the candidates, apply learned reranking, and compare all four models
-```
-
-The Step 18 training data are memory-mapped from NumPy part files. Set `REBUILD_FEATURES = False` after the parts have been created so reruns can reuse the 30 train parts and 4 validation parts.
-
-On the tested macOS Apple Silicon environment, FAISS and PyTorch must not be initialized in the same Python process because their OpenMP runtimes conflict. The Step 18 script is used for feature generation and MLP checkpoint training; its original same-process FAISS evaluation path should not be used on this environment. The reliable evaluation order is therefore:
-
-```text
-18a FAISS retrieval
-→ saved NumPy candidate arrays
-→ 18b PyTorch reranking and evaluation
 ```
 
 The main Full MIND outputs are stored under:
@@ -2273,7 +1942,6 @@ ipykernel
 pyarrow
 implicit
 faiss-cpu
-torch
 ```
 
 Later stages may add:
@@ -2281,6 +1949,7 @@ Later stages may add:
 ```text
 lightfm
 lightgbm
+torch
 sentence-transformers
 fastapi
 streamlit
@@ -2327,12 +1996,7 @@ streamlit
 * [x] Run the Full MIND heuristic reranker
 * [x] Compare Popularity, ALS, and TwoStage under the same protocol
 * [x] Record retrieval, reranking, and end-to-end latency
-* [x] Build memory-safe impression-level ranker feature parts
-* [x] Train and validate a supervised PyTorch MLP reranker
-* [x] Save the best learned-ranker checkpoint and feature statistics
-* [x] Split FAISS retrieval and PyTorch reranking into Steps 18a and 18b
-* [x] Compare Popularity, ALS, heuristic reranking, and learned reranking
-* [x] Record learned-ranker retrieval, reranking, and end-to-end latency
+* [ ] Train a learned PyTorch reranker
 * [ ] Compare MIND-small and Full MIND under the same protocol
 
 ### Classical recommendation models
@@ -2374,11 +2038,7 @@ streamlit
 * [x] Evaluate Candidate Recall@100
 * [x] Evaluate final Recall, NDCG, MRR, MAP, and Hit Rate
 * [x] Measure retrieval and reranking latency
-* [x] Construct same-impression positive and weak-negative ranker samples
-* [x] Train a pointwise PyTorch MLP with five candidate features
-* [x] Evaluate learned Recall, NDCG, MRR, MAP, and Hit Rate
-* [x] Compare the learned ranker with direct ALS and heuristic reranking
-* [x] Preserve one shared candidate set across ranker comparisons
+* [ ] Train and evaluate a learned reranker
 
 ### Bias analysis and deployment
 
@@ -2396,33 +2056,42 @@ streamlit
 
 ## Next Steps
 
-Full MIND Steps 15–18 are complete:
+Full MIND Steps 15–17 are complete:
 
 ```text
 Step 15: Popularity and ALS sample recommendations
 Step 16: Popularity versus ALS whole-catalog evaluation
 Step 17: exact FAISS top-100 retrieval and heuristic reranking
-Step 18: memory-safe feature generation and PyTorch MLP training
-Step 18a: separate FAISS candidate retrieval
-Step 18b: separate PyTorch learned reranking and four-model evaluation
 ```
 
-The completed learned-ranking pipeline is:
+The immediate next step is Step 18: train a learned PyTorch reranker instead of relying on manually selected feature weights.
+
+The planned learned-ranking pipeline is:
 
 ```text
 Full MIND train impressions
-→ clicked positives and same-impression exposed non-clicks
-→ five candidate-level features
-→ memory-safe NumPy feature parts
-→ standardized pointwise PyTorch MLP
-→ shared FAISS top-100 candidates
-→ learned reranking
-→ Popularity / ALS / heuristic / learned comparison
+→ retain clicked and exposed-but-not-clicked candidates
+→ construct candidate-level features
+→ train a small PyTorch ranking model
+→ apply the model to FAISS top-100 candidates
+→ compare learned ranking with direct ALS and heuristic reranking
 ```
 
-The learned reranker improved all five ranking metrics over direct ALS and heuristic reranking at every evaluated value of $K$. The largest relative Recall improvement over direct ALS was approximately 34.6% at $K=20$.
+Initial features may include:
 
-The immediate next step is Step 19, which will compare MIND-small and Full MIND in terms of:
+```text
+ALS user-item dot-product score
+FAISS retrieval rank
+log item popularity
+user history length
+item training-click count
+article recency
+category and subcategory match
+```
+
+The ranker must be trained without using dev labels. The same warm-start dev set and the same values of $K$ will then be used for a fair comparison.
+
+Step 19 will compare MIND-small and Full MIND in terms of:
 
 ```text
 data scale
@@ -2486,8 +2155,8 @@ Later modeling steps include:
 * User and item embeddings
 * FAISS-based retrieval
 * Top-100 candidate generation
-* Heuristic ranking features and fixed-weight reranking
-* Supervised PyTorch MLP learned reranking
+* Ranking features
+* Ranking model
 * Final top-K recommendation
 
 ### Phase 5: Deep and Content-Based Retrieval
@@ -2534,12 +2203,12 @@ Current stage:
 * PyArrow
 * implicit
 * FAISS
-* PyTorch
 
 Planned later stages:
 
 * LightFM
 * LightGBM
+* PyTorch
 * sentence-transformers
 * Hugging Face Transformers
 * FastAPI
@@ -2589,6 +2258,717 @@ The current experiments establish the first quantitative baseline:
 
 > Under the same warm-start whole-catalog evaluation protocol, implicit ALS consistently outperformed the static global Popularity baseline at K = 10, 20, 40, and 80. However, the low absolute metrics show that retrieving future clicked news from a rapidly changing catalog of more than 51,000 items remains difficult.
 
-The Full MIND extension reaches the same qualitative conclusion over 711,222 users and 101,527 items. Exact FAISS `IndexFlatIP` retrieval reproduces ALS scores and rankings, while adding a 1% static log-popularity contribution slightly reduces ranking quality.
+The Full MIND extension reaches the same qualitative conclusion over 711,222 users and 101,527 items. Exact FAISS `IndexFlatIP` retrieval reproduces ALS scores and rankings, while adding a 1% static log-popularity contribution slightly reduces ranking quality. This result motivates time-aware features and a learned reranker rather than stronger reliance on cumulative historical popularity.
 
-Step 18 then replaces the fixed heuristic with a supervised pointwise PyTorch MLP reranker. Using the same FAISS top-100 candidates, the learned ranker improves Recall, NDCG, MRR, MAP, and Hit Rate over direct ALS and heuristic reranking at every evaluated cutoff. The largest relative Recall improvement over ALS is approximately 34.6% at $K=20$, showing that a learned nonlinear ranking function is more effective than a fixed cumulative-popularity weight under the current Full MIND protocol.
+---
+
+## Latest Project Extension: Learned Reranking, Six-Model Benchmark, and Debiased Evaluation
+
+> The earlier **Current Stage** and **Next Steps** sections record the project state before Steps 18–20 were completed. The following section preserves that development history and documents the latest implementation and results.
+
+The project has now extended beyond the original ALS baseline and Full MIND heuristic pipeline:
+
+```text
+Full MIND train impressions
+→ learned PyTorch reranker
+→ six-model MIND-small benchmark
+→ propensity-weighted evaluation
+→ popularity-bias analysis
+→ bootstrap uncertainty analysis
+```
+
+The latest completed scripts are:
+
+```text
+notebooks/18_mind_large_learned_reranker.py
+notebooks/19_six_classical_models.py
+notebooks/20_debiased_evaluation.py
+```
+
+---
+
+## Step 18: Full MIND Learned Reranker
+
+The Full MIND two-stage pipeline was extended from manually chosen ALS-plus-popularity weights to a learned PyTorch reranker.
+
+### Ranker training data
+
+Training examples are extracted only from Full MIND **train** impression logs.
+
+For each training impression:
+
+```text
+clicked candidates                 → positive examples
+exposed-but-not-clicked candidates → negative examples
+```
+
+The negative sampling ratio is:
+
+```text
+1 positive : 4 sampled negatives
+```
+
+The original train behavior-row order is used to create:
+
+```text
+first 90% of train impressions → ranker training
+last 10% of train impressions  → ranker validation
+```
+
+Official dev labels are not used for ranker training, feature normalization, model selection, or early stopping.
+
+### Candidate-level features
+
+Each candidate is represented by five features:
+
+```text
+1. ALS user-item dot-product score
+2. log1p item popularity
+3. user history length
+4. user-category affinity
+5. user-subcategory affinity
+```
+
+Continuous feature means and standard deviations are computed from ranker-training samples only. The same training statistics are then applied to ranker validation and final inference.
+
+### Ranker architecture
+
+The learned reranker is a small multilayer perceptron:
+
+```text
+5 input features
+→ Linear(5, 32)
+→ ReLU
+→ Dropout(0.1)
+→ Linear(32, 16)
+→ ReLU
+→ Linear(16, 1)
+```
+
+Training uses:
+
+```text
+loss:          BCEWithLogitsLoss
+optimizer:     AdamW
+batch size:    8192
+learning rate: 0.001
+epochs:        up to 6
+early stopping patience: 2
+```
+
+The checkpoint with the lowest ranker-validation loss is retained.
+
+### Learned two-stage inference
+
+The final Full MIND learned-ranking pipeline is:
+
+```text
+ALS user vector
+→ FAISS IndexFlatIP retrieval
+→ top-100 train-unseen candidates
+→ construct five candidate features
+→ standardize with ranker-train statistics
+→ PyTorch MLP scores
+→ final top-K recommendations
+```
+
+The same warm-start Full MIND dev matrix and the same values of `K = 10, 20, 40, 80` are used to compare:
+
+```text
+Popularity
+ALS
+TwoStageHeuristic
+TwoStageLearned
+```
+
+### Generated files
+
+```text
+data/processed/mindlarge/learned_reranker.pt
+data/processed/mindlarge/learned_reranker_training_history.csv
+data/processed/mindlarge/learned_reranker_top10.csv
+data/processed/mindlarge/learned_reranker_evaluation.csv
+data/processed/mindlarge/four_model_comparison.csv
+```
+
+The learned reranker completes the modeling side of the Full MIND two-stage system. The main methodological safeguards are train-only sample construction, train-only feature normalization, explicit negative sampling from exposed candidates, and delayed use of dev labels until final evaluation.
+
+---
+
+## Step 19: Six Classical Recommendation Models on MIND-small
+
+A controlled MIND-small benchmark was added to compare six classical recommendation approaches under one shared evaluation protocol.
+
+### Compared models
+
+```text
+Popularity
+ItemKNN
+Truncated SVD
+Implicit ALS
+BPR
+LightFM-Hybrid
+```
+
+The models represent different recommendation families:
+
+```text
+Popularity:       non-personalized global frequency baseline
+ItemKNN:          neighborhood-based collaborative filtering
+Truncated SVD:    spectral low-rank approximation
+ALS:              confidence-weighted implicit matrix factorization
+BPR:              pairwise ranking optimization
+LightFM-Hybrid:   interaction learning with item identity and metadata features
+```
+
+LightFM uses:
+
+```text
+item identity
+category
+subcategory
+```
+
+Therefore, LightFM is a hybrid model with more item information than the pure interaction-based baselines.
+
+### Shared evaluation protocol
+
+All models use the same:
+
+```text
+train_interactions.npz
+dev_interactions.npz
+5,109 warm-start evaluated users
+51,282-item whole-catalog candidate universe
+train-seen item filtering
+K = 10, 20, 40, 80
+Recall, NDCG, MRR, MAP, and Hit Rate
+```
+
+Each model generates one validated top-80 recommendation list for every evaluated user. The same list is truncated for all smaller values of K.
+
+Every recommendation matrix is checked for:
+
+```text
+correct shape
+valid item indices
+no duplicate recommendations
+no train-seen recommendations
+```
+
+`implicit` ItemKNN may return `-1` when it cannot produce 80 valid items. Invalid entries are removed and the remaining positions are filled with popular train-unseen items so that every model returns exactly 80 valid recommendations.
+
+### Model configurations
+
+```text
+ItemKNN:
+    cosine similarity
+    100 neighbors
+
+Truncated SVD:
+    64 components
+    7 iterations
+
+ALS:
+    64 factors
+    regularization = 0.1
+    alpha = 40
+    15 iterations
+
+BPR:
+    64 factors
+    learning rate = 0.01
+    regularization = 0.01
+    100 iterations
+
+LightFM-Hybrid:
+    64 components
+    WARP loss
+    learning rate = 0.05
+    20 epochs
+```
+
+### Six-model results at K = 80
+
+| Model | Recall@80 | NDCG@80 | MRR@80 | MAP@80 | Hit Rate@80 |
+|---|---:|---:|---:|---:|---:|
+| Popularity | 0.001242 | 0.000271 | 0.000069 | 0.000032 | 0.002349 |
+| ItemKNN | 0.002042 | 0.001012 | 0.000874 | 0.000669 | 0.003523 |
+| Truncated SVD | 0.005116 | 0.001389 | 0.000644 | 0.000394 | 0.009591 |
+| ALS | 0.009650 | 0.002712 | 0.001243 | 0.000797 | 0.018203 |
+| BPR | 0.009846 | 0.002664 | 0.001431 | 0.000624 | 0.019769 |
+| LightFM-Hybrid | **0.012248** | **0.003426** | **0.002020** | **0.001024** | **0.021726** |
+
+LightFM achieved the highest point estimate for every reported metric at `K = 80`.
+
+ALS and BPR were close:
+
+```text
+BPR produced slightly higher Recall and Hit Rate.
+ALS produced slightly higher NDCG and MAP.
+ALS required substantially less training time.
+```
+
+### Runtime comparison
+
+| Model | Training time | Recommendation time | Recommendation latency/user |
+|---|---:|---:|---:|
+| Popularity | 0.0044 s | 0.1594 s | 0.0312 ms |
+| ItemKNN | 0.9025 s | 0.4823 s | 0.0944 ms |
+| Truncated SVD | 0.7437 s | 2.4459 s | 0.4787 ms |
+| ALS | 5.5742 s | 0.6189 s | 0.1211 ms |
+| BPR | 27.0300 s | 0.6240 s | 0.1221 ms |
+| LightFM-Hybrid | 35.6622 s | 2.6352 s | 0.5158 ms |
+
+### Interpretation
+
+The six-model comparison supports several conclusions:
+
+```text
+Highest ranking-quality point estimates: LightFM-Hybrid
+Strongest quality-efficiency balance:    ALS
+Competitive pairwise-ranking model:      BPR
+Fast but weak local-CF baseline:          ItemKNN
+Useful low-rank spectral baseline:        Truncated SVD
+Weakest temporal news baseline:           static Popularity
+```
+
+LightFM's improvement suggests that category and subcategory metadata provide useful information beyond interaction-only collaborative filtering.
+
+ALS remains a strong practical baseline because its quality is close to the strongest models while its training and recommendation costs are much lower than LightFM's.
+
+Static Popularity remains weak because globally popular training-period news has limited overlap with later dev clicks.
+
+### Generated files
+
+```text
+data/processed/six_model_comparison.csv
+data/processed/six_model_top80_recommendations.npz
+```
+
+The saved top-80 arrays allow all later bias and counterfactual-style evaluations to reuse exactly the same recommendations without retraining the six models.
+
+---
+
+## Step 20: Counterfactual-Style and Popularity-Bias Evaluation
+
+Step 20 reuses the six saved top-80 recommendation matrices and evaluates how model conclusions change after accounting for item exposure frequency and recommendation concentration.
+
+No recommendation model is retrained in this step.
+
+### Item-level exposure propensity proxy
+
+The Full logging probability
+
+$$
+P(E_{ui}=1\mid u,i)
+$$
+
+is not available in MIND. The project therefore estimates an item-level marginal exposure proxy from MIND-small train impression logs:
+
+$$
+\hat p_i
+=
+\frac{\text{number of train impressions containing item }i}
+{\text{number of train impression rows}}.
+$$
+
+Add-one smoothing is applied:
+
+$$
+\tilde p_i
+=
+\frac{\text{exposure_count}_i+1}
+{\text{number of impressions}+2}.
+$$
+
+The experiment processed:
+
+```text
+Train impression rows:          156,965
+Train-known items:               51,282
+Items exposed at least once:     20,288
+Items with zero observed exposure: 30,994
+```
+
+Because this is an item-level marginal proxy rather than a known randomized logging probability, the results are described as:
+
+```text
+counterfactual-style evaluation
+exposure-adjusted evaluation
+propensity-weighted robustness analysis
+```
+
+They are not presented as a fully unbiased causal estimate of policy value.
+
+### Inverse-propensity clipping sensitivity
+
+Inverse weights are clipped to control extreme variance. Three maximum weights were evaluated:
+
+```text
+maximum weight 100:  50,249 items clipped, 97.99%
+maximum weight 500:  48,814 items clipped, 95.19%
+maximum weight 1000: 48,249 items clipped, 94.09%
+```
+
+The main reported table uses:
+
+```text
+maximum inverse weight = 500
+scope = AllItems
+```
+
+The full sensitivity table also evaluates `SupportedRelevantOnly`, where dev relevant items with zero observed train exposure are removed.
+
+Severe clipping remains an important limitation: even at a cap of 1000, more than 94% of items reach the maximum inverse weight.
+
+### Support diagnostics
+
+```text
+Zero-exposure dev positive pairs:        209
+Zero-exposure unique dev positive items:   2
+```
+
+The support issue is concentrated in only two unique items, although those items account for 209 dev positive pairs.
+
+### Weighted ranking metrics
+
+Step 20 reports:
+
+```text
+Naive NDCG
+IPS-weighted NDCG
+SNIPS-style NDCG
+```
+
+The SNIPS-style metric is calculated as:
+
+$$
+\frac{
+\sum_u \text{weighted DCG}_u
+}{
+\sum_u \text{weighted ideal DCG}_u
+}.
+$$
+
+This is a self-normalized weighted ranking metric. It is not claimed to be a strict policy-value SNIPS estimator.
+
+### Primary weighted results at K = 80
+
+| Model | Naive NDCG | IPS NDCG | SNIPS-style NDCG |
+|---|---:|---:|---:|
+| Popularity | 0.000271 | 0.000164 | 0.000009 |
+| ItemKNN | 0.001012 | 0.000833 | 0.000314 |
+| Truncated SVD | 0.001389 | 0.000925 | 0.000140 |
+| ALS | 0.002712 | 0.001796 | 0.000386 |
+| BPR | 0.002664 | 0.001904 | **0.000975** |
+| LightFM-Hybrid | **0.003426** | **0.002260** | 0.000607 |
+
+The model ranking changes with the evaluation objective:
+
+```text
+Naive NDCG point estimate: LightFM > ALS ≈ BPR
+IPS NDCG point estimate:   LightFM > BPR > ALS
+SNIPS-style NDCG:          BPR > LightFM > ALS
+```
+
+LightFM produces the strongest ordinary ranking point estimate. BPR performs best when relevant items with lower estimated exposure receive greater weight.
+
+### Popularity-head and long-tail definitions
+
+Item popularity is the number of unique train users who clicked the item.
+
+The popularity head is defined as the smallest set of items accounting for 80% of all train clicks:
+
+```text
+Head items:                         4,591
+Long-tail items with train clicks: 35,274
+```
+
+A long-tail item must:
+
+```text
+have at least one train click
+and
+fall outside the 80%-click popularity head
+```
+
+Items with zero train clicks are measured separately and are not counted as long-tail items.
+
+### Popularity-bias results at K = 80
+
+| Model | Average popularity | Long-tail share | Catalog coverage | Active catalog coverage |
+|---|---:|---:|---:|---:|
+| Popularity | 1856.05 | 0.000000 | 0.002594 | 0.003336 |
+| ItemKNN | 1103.05 | **0.354130** | **0.494072** | **0.635570** |
+| Truncated SVD | 929.73 | 0.000188 | 0.024863 | 0.031983 |
+| ALS | 814.04 | 0.001757 | 0.074490 | 0.095823 |
+| BPR | **195.26** | 0.247659 | 0.198900 | 0.255864 |
+| LightFM-Hybrid | 978.02 | 0.025073 | 0.141609 | 0.182165 |
+
+All six models produced:
+
+```text
+ZeroPopularityRecommendationShare = 0
+```
+
+Therefore, the measured long-tail recommendations came from items with observed train clicks rather than completely inactive items.
+
+### Popularity-bias interpretation
+
+```text
+Popularity:
+    most concentrated model
+    almost no catalog coverage
+    no long-tail recommendations
+
+ItemKNN:
+    highest catalog coverage and long-tail share
+    substantially weaker relevance metrics
+
+ALS:
+    efficient and accurate baseline
+    strongly concentrated on popularity-head items
+
+BPR:
+    lowest average recommendation popularity
+    high long-tail share
+    competitive naive relevance
+    highest SNIPS-style NDCG
+
+LightFM-Hybrid:
+    highest naive ranking point estimate
+    better coverage than ALS
+    substantially more popularity-focused than BPR
+```
+
+BPR provides the strongest observed balance between ranking relevance and reduced popularity concentration.
+
+### Bootstrap confidence intervals
+
+The project performs paired user-level bootstrap analysis at `K = 80`:
+
+```text
+bootstrap samples: 1,000
+random seed:       42
+primary max weight: 500
+```
+
+#### Naive NDCG bootstrap intervals
+
+| Model | Estimate | 95% bootstrap interval |
+|---|---:|---:|
+| Popularity | 0.000271 | [0.000113, 0.000453] |
+| ItemKNN | 0.001008 | [0.000438, 0.001764] |
+| Truncated SVD | 0.001394 | [0.000921, 0.001960] |
+| ALS | 0.002709 | [0.002006, 0.003501] |
+| BPR | 0.002666 | [0.002073, 0.003361] |
+| LightFM-Hybrid | 0.003429 | [0.002676, 0.004201] |
+
+Paired naive-NDCG differences among LightFM, ALS, and BPR all have confidence intervals that include zero:
+
+```text
+LightFM - ALS:  0.000720, 95% CI [-0.000178, 0.001543]
+LightFM - BPR:  0.000763, 95% CI [-0.000175, 0.001683]
+BPR - ALS:     -0.000043, 95% CI [-0.000931, 0.000762]
+```
+
+Therefore:
+
+> LightFM has the highest naive NDCG point estimate, but the paired bootstrap analysis does not establish a statistically clear naive winner among LightFM, ALS, and BPR at K = 80.
+
+#### SNIPS-style NDCG bootstrap intervals
+
+| Model | Estimate | 95% bootstrap interval |
+|---|---:|---:|
+| Popularity | 0.000009 | [0.000004, 0.000014] |
+| ItemKNN | 0.000315 | [0.000087, 0.000699] |
+| Truncated SVD | 0.000139 | [0.000086, 0.000208] |
+| ALS | 0.000386 | [0.000252, 0.000538] |
+| BPR | **0.000972** | [0.000711, 0.001256] |
+| LightFM-Hybrid | 0.000614 | [0.000424, 0.000861] |
+
+Paired SNIPS-style differences are:
+
+```text
+LightFM - ALS:  0.000228, 95% CI [ 0.000023,  0.000472]
+LightFM - BPR: -0.000358, 95% CI [-0.000654, -0.000072]
+BPR - ALS:      0.000586, 95% CI [ 0.000305,  0.000897]
+```
+
+Under the current item-level propensity proxy and primary clipping configuration, the bootstrap-supported SNIPS-style ordering is:
+
+```text
+BPR > LightFM > ALS
+```
+
+### Main interpretation of Steps 19–20
+
+The latest experiments show that there is no single universal winner. Model ranking depends on the objective being measured.
+
+```text
+Highest naive ranking point estimate:
+LightFM-Hybrid
+
+Statistically clear naive winner among LightFM, ALS, and BPR:
+None at K = 80 under the paired bootstrap intervals
+
+Highest SNIPS-style weighted NDCG:
+BPR
+
+Best observed accuracy-popularity-bias balance:
+BPR
+
+Best quality-efficiency balance:
+ALS
+
+Highest catalog exploration:
+ItemKNN
+
+Most concentrated and weakest baseline:
+Static Popularity
+```
+
+The central result is:
+
+> LightFM produces the strongest ordinary ranking point estimate, while BPR becomes strongest under exposure-adjusted weighting and recommends substantially less popular content. ALS remains the most efficient high-quality collaborative-filtering baseline.
+
+### Important limitations
+
+The counterfactual-style evaluation has several explicit limitations:
+
+```text
+1. The true user-item logging propensity is unavailable.
+2. The implemented propensity is an item-level marginal proxy.
+3. MIND exposure was generated by an unknown, non-randomized policy.
+4. More than 94% of items remain weight-clipped even at the largest tested cap.
+5. SNIPSStyleNDCG is not a strict policy-value SNIPS estimator.
+6. The evaluation includes only 5,109 warm-start users.
+7. Whole-catalog results should not be compared directly with impression-level MIND benchmarks.
+```
+
+For these reasons, the weighted results are interpreted as a robustness and popularity-bias diagnostic rather than a fully unbiased causal estimate.
+
+Doubly Robust evaluation is intentionally deferred. Without a more reliable user-item propensity model and a clearly specified outcome model, adding a DR estimator would increase complexity without necessarily improving validity.
+
+### Generated files
+
+```text
+data/processed/item_propensity.csv
+data/processed/item_propensity.npy
+data/processed/item_inverse_propensity.npy
+data/processed/debiased_evaluation_comparison.csv
+data/processed/debiased_evaluation_sensitivity.csv
+data/processed/popularity_bias_comparison.csv
+data/processed/recommendation_support_diagnostics.csv
+data/processed/propensity_support_summary.json
+data/processed/bootstrap_confidence_intervals.csv
+data/processed/bootstrap_pairwise_differences.csv
+```
+
+---
+
+## Running the Latest Steps
+
+From the repository root:
+
+```bash
+# Full MIND learned reranker
+python notebooks/18_mind_large_learned_reranker.py
+
+# Six-model MIND-small benchmark
+python notebooks/19_six_classical_models.py
+
+# Debiased and popularity-bias evaluation
+python notebooks/20_debiased_evaluation.py
+```
+
+Step 20 expects Step 19 to have already created:
+
+```text
+data/processed/six_model_top80_recommendations.npz
+```
+
+The six classical models require:
+
+```text
+implicit
+scikit-learn
+lightfm-next
+```
+
+`lightfm-next` is installed as the maintained package, while the Python import remains:
+
+```python
+from lightfm import LightFM
+```
+
+The learned reranker additionally requires:
+
+```text
+PyTorch
+FAISS
+```
+
+---
+
+## Final Current Status
+
+The recommendation and evaluation pipeline now includes:
+
+```text
+[x] Mathematical exposure-bias formulation
+[x] Toy truncated-SVD recommender
+[x] MIND-small interaction parsing and metadata processing
+[x] Warm-start sparse train/dev matrices
+[x] Popularity baseline
+[x] Implicit ALS
+[x] Whole-catalog ranking metrics
+[x] MIND-small FAISS two-stage pipeline
+[x] Full MIND streaming data processing
+[x] Full MIND sparse matrix construction
+[x] Full MIND ALS training
+[x] Full MIND exact FAISS retrieval
+[x] Full MIND heuristic reranking
+[x] Full MIND learned PyTorch reranker
+[x] Six-model classical benchmark
+[x] BPR implementation
+[x] LightFM hybrid implementation
+[x] Item-level exposure propensity proxy
+[x] IPS-weighted NDCG
+[x] SNIPS-style NDCG
+[x] Weight-clipping sensitivity analysis
+[x] Support diagnostics
+[x] Popularity-bias analysis
+[x] Long-tail recommendation analysis
+[x] Catalog and active-catalog coverage
+[x] User-level bootstrap confidence intervals
+[x] Paired bootstrap model comparisons
+```
+
+The core modeling and offline-evaluation work is complete.
+
+Possible future extensions are optional rather than required for the current project:
+
+```text
+impression-level ranking evaluation
+recent-window or time-decayed popularity
+text and semantic news embeddings
+cold-start evaluation
+two-tower retrieval
+online service or demo deployment
+```
+
+The project now demonstrates an end-to-end recommendation workflow that connects:
+
+```text
+large-scale data engineering
+implicit-feedback matrix factorization
+nearest-neighbor and pairwise-ranking baselines
+hybrid metadata modeling
+two-stage retrieval and reranking
+whole-catalog ranking evaluation
+exposure-adjusted robustness analysis
+popularity-bias measurement
+statistical uncertainty estimation
+```
